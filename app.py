@@ -1,5 +1,7 @@
 """Interactive Plotly Dash app for the flap-servo simulation."""
 
+from functools import lru_cache
+
 import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dcc, html
@@ -13,13 +15,15 @@ PARAMS = [
     {"id": "servo-travel", "name": "Servo travel x", "min": 5, "max": 15, "step": 0.1, "value": 9.0},
     {"id": "flap-x", "name": "Flap attach x", "min": -5, "max": 20, "step": 0.1, "value": 0.0},
     {"id": "flap-y", "name": "Flap attach y", "min": 5, "max": 10, "step": 0.1, "value": 10.0},
+    # Live cursor: redraws while dragging rather than on release.
     {"id": "current-input", "name": "Servo input", "min": 0, "max": 1, "step": 0.01,
-     "value": 0.0, "design": False},
+     "value": 0.0, "design": False, "updatemode": "drag"},
 ]
 
 # Sliders the optimizer is allowed to move.  "current-input" is only a viewing
-# cursor, so it gets no constraint dropdown.
+# cursor, so it gets no constraint dropdown and sits under the layout plot.
 DESIGN_PARAMS = [p for p in PARAMS if p.get("design", True)]
+INPUT_PARAM = next(p for p in PARAMS if not p.get("design", True))
 
 CONSTRAINT_OPTIONS = [
     {"label": "= (locked)", "value": "fixed"},
@@ -57,6 +61,7 @@ def _slider(p):
             step=p["step"],
             value=p["value"],
             tooltip={"placement": "bottom", "always_visible": False},
+            updatemode=p.get("updatemode", "mouseup"),
         )
     ]
     children = [html.Label(p["name"], style={"fontWeight": "bold"})]
@@ -87,7 +92,7 @@ app.layout = html.Div(
     [
         html.H1("Airplane Flap Dynamics"),
         html.Div(
-            [_slider(p) for p in PARAMS],
+            [_slider(p) for p in DESIGN_PARAMS],
             style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "10px"},
         ),
         html.Div(
@@ -163,7 +168,12 @@ app.layout = html.Div(
         ),
         html.Div(
             [
-                dcc.Graph(id="physical-graph", style={"height": "550px"}),
+                html.Div(
+                    [
+                        dcc.Graph(id="physical-graph", style={"height": "550px"}),
+                        _slider(INPUT_PARAM),
+                    ]
+                ),
                 dcc.Graph(id="curve-graph", style={"height": "550px"}),
             ],
             style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "20px"},
@@ -258,20 +268,69 @@ def _optimize_status(result, objective, min_max_angle=None):
     return lines
 
 
-@callback(
-    Output("physical-graph", "figure"),
-    Output("curve-graph", "figure"),
-    Output("angle-display", "children"),
-    [Input(p["id"], "value") for p in PARAMS],
-)
-def update(servo_x, servo_y, servo_travel, flap_x, flap_y, current_input):
+CURVE_INPUTS = np.linspace(0, 1, 201)
+
+
+def _flap_len(flap_x, flap_y):
+    return max(np.hypot(flap_x, flap_y) * 1.5, 2.0)
+
+
+def _padded(lo, hi, pad=0.05):
+    """An axis range covering [lo, hi] with a margin, safe on degenerate spans."""
+    lo, hi = float(lo), float(hi)
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return None
+    span = hi - lo
+    margin = pad * span if span > 1e-9 else max(abs(hi), 1.0) * pad
+    return [lo - margin, hi + margin]
+
+
+def _plot_ranges(res, servo_x, servo_y, servo_travel, flap_x, flap_y):
+    """Axis ranges covering everything either plot can draw over the full sweep.
+
+    Fixing these to the sweep keeps the axes still while the input cursor moves,
+    since only the cursor-dependent traces would otherwise resize them.
+    """
+    valid = res["valid"]
+    th = res["flap_angle_rad"][valid]
+    r_attach = np.hypot(flap_x, flap_y)
+    flap_len = _flap_len(flap_x, flap_y)
+
+    # Hinge, servo rail, and the full attachment locus circle.
+    xs = [0.0, servo_x, servo_x + servo_travel, -r_attach, r_attach]
+    ys = [0.0, servo_y, -r_attach, r_attach]
+    # Flap tip across every angle reached, plus the neutral pose drawn when the
+    # geometry has no solution.
+    xs.append(-flap_len)
+    ys.append(0.0)
+    if th.size:
+        xs.extend(-flap_len * np.cos(th))
+        ys.extend(flap_len * np.sin(th))
+        xs.extend(res["attach_x"][valid])
+        ys.extend(res["attach_y"][valid])
+
+    angles = res["flap_angle_deg"][valid]
+    ratio = torque_force_ratio(res, servo_travel)
+    ratio = ratio[np.isfinite(ratio)]
+
+    return {
+        "physical_x": _padded(np.min(xs), np.max(xs)),
+        "physical_y": _padded(np.min(ys), np.max(ys)),
+        "angle_y": _padded(np.min(angles), np.max(angles)) if angles.size else None,
+        "ratio_y": _padded(np.min(ratio), np.max(ratio)) if ratio.size else None,
+    }
+
+
+@lru_cache(maxsize=64)
+def _sweep(servo_x, servo_y, servo_travel, flap_x, flap_y):
+    """Rod length, full servo sweep, and fixed axis ranges for one geometry.
+
+    The "Servo input" slider redraws while being dragged, and moving it does not
+    change the geometry, so all of this is cached and only the cursor index moves.
+    """
     rod_length = auto_rod_length(servo_x, servo_y, servo_travel, flap_x, flap_y)
-
-    curve_inputs = np.linspace(0, 1, 201)
-    all_inputs = np.sort(np.unique(np.concatenate([curve_inputs, [current_input]])))
-
     res = simulate_flap(
-        all_inputs,
+        CURVE_INPUTS,
         servo_x=servo_x,
         servo_y=servo_y,
         servo_travel=servo_travel,
@@ -279,16 +338,29 @@ def update(servo_x, servo_y, servo_travel, flap_x, flap_y, current_input):
         flap_y=flap_y,
         rod_length=rod_length,
     )
+    ranges = _plot_ranges(res, servo_x, servo_y, servo_travel, flap_x, flap_y)
+    return rod_length, res, ranges
 
-    current_idx = int(np.argmin(np.abs(all_inputs - current_input)))
+
+@callback(
+    Output("physical-graph", "figure"),
+    Output("curve-graph", "figure"),
+    Output("angle-display", "children"),
+    [Input(p["id"], "value") for p in PARAMS],
+)
+def update(servo_x, servo_y, servo_travel, flap_x, flap_y, current_input):
+    rod_length, res, ranges = _sweep(servo_x, servo_y, servo_travel, flap_x, flap_y)
+
+    # The 201-point grid lands on every 0.01 step, so the cursor snaps exactly.
+    current_idx = int(np.argmin(np.abs(CURVE_INPUTS - current_input)))
     theta = float(res["flap_angle_rad"][current_idx])
     valid = bool(res["valid"][current_idx])
 
     physical = _build_physical_figure(
         valid, theta, res["attach_x"][current_idx], res["attach_y"][current_idx],
-        servo_x, servo_y, servo_travel, current_input, flap_x, flap_y,
+        servo_x, servo_y, servo_travel, current_input, flap_x, flap_y, ranges,
     )
-    curve = _build_curve_figure(res, current_idx, servo_travel)
+    curve = _build_curve_figure(res, current_idx, servo_travel, ranges)
 
     if valid:
         angle_text = (
@@ -304,10 +376,10 @@ def update(servo_x, servo_y, servo_travel, flap_x, flap_y, current_input):
 
 def _build_physical_figure(valid, theta, attach_x, attach_y,
                            servo_x, servo_y, servo_travel, current_input,
-                           flap_x, flap_y):
+                           flap_x, flap_y, ranges):
     fig = go.Figure()
 
-    flap_len = max(np.hypot(flap_x, flap_y) * 1.5, 2.0)
+    flap_len = _flap_len(flap_x, flap_y)
     if valid:
         flap_end_x = -flap_len * np.cos(theta)
         flap_end_y = flap_len * np.sin(theta)
@@ -411,15 +483,19 @@ def _build_physical_figure(valid, theta, attach_x, attach_y,
 
     fig.update_layout(
         title="Physical layout",
-        xaxis={"title": "x"},
-        yaxis={"title": "y", "scaleanchor": "x", "scaleratio": 1},
+        # Ranges come from the whole sweep so the view holds still as the input
+        # cursor moves.  scaleanchor keeps the aspect square; Plotly may widen
+        # one axis past the request to honour it, which is fine and stable.
+        xaxis={"title": "x", "range": ranges["physical_x"], "autorange": False},
+        yaxis={"title": "y", "scaleanchor": "x", "scaleratio": 1,
+               "range": ranges["physical_y"], "autorange": False},
         showlegend=True,
         margin={"l": 40, "r": 40, "t": 60, "b": 40},
     )
     return fig
 
 
-def _build_curve_figure(res, current_idx, servo_travel):
+def _build_curve_figure(res, current_idx, servo_travel, ranges):
     x = res["servo_input"]
     y = res["flap_angle_deg"]
     valid = res["valid"]
@@ -473,13 +549,16 @@ def _build_curve_figure(res, current_idx, servo_travel):
         title="Servo input vs. flap angle and mechanical advantage",
         xaxis={"title": "Servo input (0 → 1)", "range": [0, 1]},
         yaxis={"title": {"text": "Flap angle (degrees)", "font": {"color": "blue"}},
-               "tickfont": {"color": "blue"}},
+               "tickfont": {"color": "blue"},
+               "range": ranges["angle_y"], "autorange": ranges["angle_y"] is None},
         yaxis2={
             "title": {"text": "Torque / servo force (length)", "font": {"color": "orange"}},
             "tickfont": {"color": "orange"},
             "overlaying": "y",
             "side": "right",
             "showgrid": False,
+            "range": ranges["ratio_y"],
+            "autorange": ranges["ratio_y"] is None,
         },
         legend={"orientation": "h", "y": -0.2},
         margin={"l": 40, "r": 60, "t": 60, "b": 40},
