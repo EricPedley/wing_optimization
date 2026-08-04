@@ -2,9 +2,10 @@
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, callback, dcc, html
+from dash import Dash, Input, Output, State, callback, dcc, html
 
-from core import auto_rod_length, simulate_flap
+import optimize as opt
+from core import auto_rod_length, simulate_flap, torque_force_ratio
 
 PARAMS = [
     {"id": "servo-x", "name": "Servo start x", "min": 10, "max": 20, "step": 0.1, "value": 15.0},
@@ -12,25 +13,73 @@ PARAMS = [
     {"id": "servo-travel", "name": "Servo travel x", "min": 5, "max": 15, "step": 0.1, "value": 9.0},
     {"id": "flap-x", "name": "Flap attach x", "min": -5, "max": 20, "step": 0.1, "value": 0.0},
     {"id": "flap-y", "name": "Flap attach y", "min": 5, "max": 10, "step": 0.1, "value": 10.0},
-    {"id": "current-input", "name": "Servo input", "min": 0, "max": 1, "step": 0.01, "value": 0.0},
+    {"id": "current-input", "name": "Servo input", "min": 0, "max": 1, "step": 0.01,
+     "value": 0.0, "design": False},
+]
+
+# Sliders the optimizer is allowed to move.  "current-input" is only a viewing
+# cursor, so it gets no constraint dropdown.
+DESIGN_PARAMS = [p for p in PARAMS if p.get("design", True)]
+
+CONSTRAINT_OPTIONS = [
+    {"label": "= (locked)", "value": "fixed"},
+    {"label": "≤ slider", "value": "le"},
+    {"label": "≥ slider", "value": "ge"},
+    {"label": "unconstrained", "value": "free"},
+]
+
+OBJECTIVE_OPTIONS = [
+    {"label": "No optimization", "value": "none"},
+    {"label": "Area under mechanical-advantage curve", "value": "area"},
+    {"label": "Peak mechanical advantage", "value": "peak"},
+    {"label": "Minimum mechanical advantage", "value": "min"},
+]
+
+OBJECTIVE_LABELS = {"area": "Area", "peak": "Peak", "min": "Minimum"}
+
+SOFT_OPTIONS = [
+    {"label": "Peak advantage occurs at flap angle = 0", "value": "peak_at_zero"},
+    {"label": "Advantage at min angle == advantage at max angle", "value": "symmetric_ends"},
 ]
 
 
+def _var_name(param_id):
+    """Slider id ('servo-x') to optimizer variable name ('servo_x')."""
+    return param_id.replace("-", "_")
+
+
 def _slider(p):
-    return html.Div(
-        [
-            html.Label(p["name"], style={"fontWeight": "bold"}),
-            dcc.Slider(
-                id=p["id"],
-                min=p["min"],
-                max=p["max"],
-                step=p["step"],
-                value=p["value"],
-                tooltip={"placement": "bottom", "always_visible": False},
-            ),
-        ],
-        style={"padding": "10px"},
-    )
+    row = [
+        dcc.Slider(
+            id=p["id"],
+            min=p["min"],
+            max=p["max"],
+            step=p["step"],
+            value=p["value"],
+            tooltip={"placement": "bottom", "always_visible": False},
+        )
+    ]
+    children = [html.Label(p["name"], style={"fontWeight": "bold"})]
+
+    if p.get("design", True):
+        body = html.Div(
+            [
+                html.Div(row, style={"flex": "1 1 auto", "minWidth": "0"}),
+                dcc.Dropdown(
+                    id=f"{p['id']}-constraint",
+                    options=CONSTRAINT_OPTIONS,
+                    value="fixed",
+                    clearable=False,
+                    style={"width": "150px"},
+                ),
+            ],
+            style={"display": "flex", "alignItems": "center", "gap": "10px"},
+        )
+        children.append(body)
+    else:
+        children.extend(row)
+
+    return html.Div(children, style={"padding": "10px"})
 
 
 app = Dash(__name__)
@@ -43,6 +92,50 @@ app.layout = html.Div(
         ),
         html.Div(
             [
+                html.Div(
+                    [
+                        html.Label("Objective", style={"fontWeight": "bold"}),
+                        dcc.Dropdown(
+                            id="objective",
+                            options=OBJECTIVE_OPTIONS,
+                            value="none",
+                            clearable=False,
+                        ),
+                    ]
+                ),
+                html.Div(
+                    [
+                        html.Label("Nice-to-have constraints", style={"fontWeight": "bold"}),
+                        dcc.Checklist(
+                            id="soft-constraints",
+                            options=SOFT_OPTIONS,
+                            value=[],
+                            labelStyle={"display": "block"},
+                        ),
+                    ]
+                ),
+                html.Div(
+                    [
+                        html.Button(
+                            "Run optimization",
+                            id="run-optimize",
+                            n_clicks=0,
+                            style={"padding": "10px 20px", "fontSize": "1em"},
+                        ),
+                        dcc.Loading(
+                            html.Div(id="optimize-status", style={"paddingTop": "10px"}),
+                            type="dot",
+                        ),
+                    ]
+                ),
+            ],
+            style={"display": "grid", "gridTemplateColumns": "1fr 1fr 1fr",
+                   "gap": "20px", "padding": "10px",
+                   "border": "1px solid #ddd", "borderRadius": "6px",
+                   "margin": "10px"},
+        ),
+        html.Div(
+            [
                 dcc.Graph(id="physical-graph", style={"height": "550px"}),
                 dcc.Graph(id="curve-graph", style={"height": "550px"}),
             ],
@@ -52,6 +145,66 @@ app.layout = html.Div(
     ],
     style={"maxWidth": "1400px", "margin": "0 auto"},
 )
+
+
+@callback(
+    Output("run-optimize", "disabled"),
+    Input("objective", "value"),
+)
+def toggle_run_button(objective):
+    return objective == "none"
+
+
+@callback(
+    [Output(p["id"], "value") for p in DESIGN_PARAMS],
+    Output("optimize-status", "children"),
+    Input("run-optimize", "n_clicks"),
+    [State(p["id"], "value") for p in DESIGN_PARAMS],
+    [State(f"{p['id']}-constraint", "value") for p in DESIGN_PARAMS],
+    State("objective", "value"),
+    State("soft-constraints", "value"),
+    running=[(Output("run-optimize", "disabled"), True, False)],
+    prevent_initial_call=True,
+)
+def run_optimization(_n_clicks, *state):
+    n = len(DESIGN_PARAMS)
+    slider_values = state[:n]
+    constraint_modes = state[n:2 * n]
+    objective, soft = state[2 * n], state[2 * n + 1] or []
+
+    values = {_var_name(p["id"]): v for p, v in zip(DESIGN_PARAMS, slider_values)}
+    modes = {_var_name(p["id"]): m for p, m in zip(DESIGN_PARAMS, constraint_modes)}
+    ranges = {_var_name(p["id"]): (p["min"], p["max"]) for p in DESIGN_PARAMS}
+
+    result = opt.optimize(values, modes, ranges, objective, soft)
+    new_values = [round(result["values"][_var_name(p["id"])], 3) for p in DESIGN_PARAMS]
+
+    return [*new_values, _optimize_status(result, objective)]
+
+
+def _optimize_status(result, objective):
+    start, best = result["start_metrics"], result["best_metrics"]
+    lines = [
+        html.Div(f"{result['message']}  ({result['elapsed']:.1f}s, "
+                 f"{result['n_free']} free variable(s))"),
+    ]
+    if start is None or best is None:
+        lines.append(html.Div("No valid geometry to score.", style={"color": "crimson"}))
+        return lines
+
+    if objective in OBJECTIVE_LABELS:
+        label = OBJECTIVE_LABELS[objective]
+        lines.append(html.Div(f"{label}: {start[objective]:.3f} → {best[objective]:.3f}"))
+    lines.append(html.Div(
+        f"Peak at flap angle: {np.degrees(start['theta_at_peak']):.2f}° → "
+        f"{np.degrees(best['theta_at_peak']):.2f}°"
+    ))
+    lines.append(html.Div(
+        f"Advantage at min/max angle: {start['mag_at_min_angle']:.2f}/"
+        f"{start['mag_at_max_angle']:.2f} → {best['mag_at_min_angle']:.2f}/"
+        f"{best['mag_at_max_angle']:.2f}"
+    ))
+    return lines
 
 
 @callback(
@@ -215,35 +368,11 @@ def _build_physical_figure(valid, theta, attach_x, attach_y,
     return fig
 
 
-def _torque_force_ratio(res, servo_travel):
-    """Hinge torque per unit servo force, from virtual work.
-
-    The servo does work F * dx along the rail while the flap absorbs tau * dtheta
-    at the hinge, so tau / F = (dx/du) / (dtheta/du) = servo_travel / (dtheta/du).
-    Units are length (same units as the geometry inputs).
-    """
-    u = res["servo_input"]
-    theta = res["flap_angle_rad"]
-    valid = res["valid"]
-
-    ratio = np.full(u.size, np.nan)
-    if valid.sum() < 2:
-        return ratio
-
-    idx = np.where(valid)[0]
-    # Differentiate only across the contiguous valid samples to avoid straddling
-    # gaps where no geometry exists.
-    dtheta_du = np.gradient(theta[idx], u[idx])
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio[idx] = np.where(dtheta_du != 0.0, servo_travel / dtheta_du, np.nan)
-    return ratio
-
-
 def _build_curve_figure(res, current_idx, servo_travel):
     x = res["servo_input"]
     y = res["flap_angle_deg"]
     valid = res["valid"]
-    ratio = _torque_force_ratio(res, servo_travel)
+    ratio = torque_force_ratio(res, servo_travel)
 
     fig = go.Figure()
     fig.add_trace(

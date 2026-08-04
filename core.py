@@ -193,6 +193,30 @@ def auto_rod_length(servo_x: float, servo_y: float, servo_travel: float,
     return (L_low + L_high) * 0.5
 
 
+def torque_force_ratio(res: dict, servo_travel: float) -> np.ndarray:
+    """Hinge torque per unit servo force, from virtual work.
+
+    The servo does work F * dx along the rail while the flap absorbs tau * dtheta
+    at the hinge, so tau / F = (dx/du) / (dtheta/du) = servo_travel / (dtheta/du).
+    Units are length (same units as the geometry inputs).
+    """
+    u = res["servo_input"]
+    theta = res["flap_angle_rad"]
+    valid = res["valid"]
+
+    ratio = np.full(u.size, np.nan)
+    if valid.sum() < 2:
+        return ratio
+
+    idx = np.where(valid)[0]
+    # Differentiate only across the contiguous valid samples to avoid straddling
+    # gaps where no geometry exists.
+    dtheta_du = np.gradient(theta[idx], u[idx])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio[idx] = np.where(dtheta_du != 0.0, servo_travel / dtheta_du, np.nan)
+    return ratio
+
+
 def simulate_flap(inputs: FloatArray,
                   servo_x: float,
                   servo_y: float,
