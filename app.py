@@ -7,10 +7,10 @@ from dash import Dash, Input, Output, callback, dcc, html
 from core import auto_rod_length, simulate_flap
 
 PARAMS = [
-    {"id": "servo-x", "name": "Servo start x", "min": 0, "max": 20, "step": 0.1, "value": 15.0},
-    {"id": "servo-y", "name": "Servo y", "min": 0, "max": 20, "step": 0.1, "value": 6.0},
+    {"id": "servo-x", "name": "Servo start x", "min": 10, "max": 20, "step": 0.1, "value": 15.0},
+    {"id": "servo-y", "name": "Servo y", "min": 0, "max": 10, "step": 0.1, "value": 6.0},
     {"id": "servo-travel", "name": "Servo travel x", "min": 5, "max": 15, "step": 0.1, "value": 9.0},
-    {"id": "flap-x", "name": "Flap attach x", "min": 0, "max": 20, "step": 0.1, "value": 0.0},
+    {"id": "flap-x", "name": "Flap attach x", "min": -5, "max": 20, "step": 0.1, "value": 0.0},
     {"id": "flap-y", "name": "Flap attach y", "min": 5, "max": 10, "step": 0.1, "value": 10.0},
     {"id": "current-input", "name": "Servo input", "min": 0, "max": 1, "step": 0.01, "value": 0.0},
 ]
@@ -84,7 +84,7 @@ def update(servo_x, servo_y, servo_travel, flap_x, flap_y, current_input):
         valid, theta, res["attach_x"][current_idx], res["attach_y"][current_idx],
         servo_x, servo_y, servo_travel, current_input, flap_x, flap_y,
     )
-    curve = _build_curve_figure(res, current_idx)
+    curve = _build_curve_figure(res, current_idx, servo_travel)
 
     if valid:
         angle_text = (
@@ -215,10 +215,35 @@ def _build_physical_figure(valid, theta, attach_x, attach_y,
     return fig
 
 
-def _build_curve_figure(res, current_idx):
+def _torque_force_ratio(res, servo_travel):
+    """Hinge torque per unit servo force, from virtual work.
+
+    The servo does work F * dx along the rail while the flap absorbs tau * dtheta
+    at the hinge, so tau / F = (dx/du) / (dtheta/du) = servo_travel / (dtheta/du).
+    Units are length (same units as the geometry inputs).
+    """
+    u = res["servo_input"]
+    theta = res["flap_angle_rad"]
+    valid = res["valid"]
+
+    ratio = np.full(u.size, np.nan)
+    if valid.sum() < 2:
+        return ratio
+
+    idx = np.where(valid)[0]
+    # Differentiate only across the contiguous valid samples to avoid straddling
+    # gaps where no geometry exists.
+    dtheta_du = np.gradient(theta[idx], u[idx])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio[idx] = np.where(dtheta_du != 0.0, servo_travel / dtheta_du, np.nan)
+    return ratio
+
+
+def _build_curve_figure(res, current_idx, servo_travel):
     x = res["servo_input"]
     y = res["flap_angle_deg"]
     valid = res["valid"]
+    ratio = _torque_force_ratio(res, servo_travel)
 
     fig = go.Figure()
     fig.add_trace(
@@ -228,6 +253,17 @@ def _build_curve_figure(res, current_idx):
             mode="lines",
             line={"color": "blue", "width": 2},
             name="Flap angle",
+            connectgaps=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=ratio,
+            mode="lines",
+            line={"color": "orange", "width": 2},
+            name="Torque / servo force",
+            yaxis="y2",
             connectgaps=False,
         )
     )
@@ -241,12 +277,32 @@ def _build_curve_figure(res, current_idx):
                 name="Current input",
             )
         )
+        if np.isfinite(ratio[current_idx]):
+            fig.add_trace(
+                go.Scatter(
+                    x=[x[current_idx]],
+                    y=[ratio[current_idx]],
+                    mode="markers",
+                    marker={"color": "darkorange", "size": 12},
+                    name="Current ratio",
+                    yaxis="y2",
+                )
+            )
 
     fig.update_layout(
-        title="Servo input vs. flap angle",
+        title="Servo input vs. flap angle and mechanical advantage",
         xaxis={"title": "Servo input (0 → 1)", "range": [0, 1]},
-        yaxis={"title": "Flap angle (degrees)"},
-        margin={"l": 40, "r": 40, "t": 60, "b": 40},
+        yaxis={"title": {"text": "Flap angle (degrees)", "font": {"color": "blue"}},
+               "tickfont": {"color": "blue"}},
+        yaxis2={
+            "title": {"text": "Torque / servo force (length)", "font": {"color": "orange"}},
+            "tickfont": {"color": "orange"},
+            "overlaying": "y",
+            "side": "right",
+            "showgrid": False,
+        },
+        legend={"orientation": "h", "y": -0.2},
+        margin={"l": 40, "r": 60, "t": 60, "b": 40},
     )
     return fig
 
