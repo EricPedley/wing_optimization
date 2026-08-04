@@ -1,13 +1,24 @@
-"""Interactive Plotly Dash app for the flap-servo simulation."""
+"""Interactive Plotly Dash app for the flap-servo simulation.
 
+The geometry solve and the optimizer both run through the JAX model in
+:mod:`fastmodel`, which is fast enough (~0.2 s for a full 128-start search) that
+optimization runs automatically whenever an input settles, rather than sitting
+behind a button.
+
+The design sliders are the *baseline* geometry and the anchors that "<=" and
+">=" constraints are measured against, so the optimizer never writes back to
+them; its result is held separately and applied only on request.
+"""
+
+import threading
 from functools import lru_cache
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, callback, dcc, html
+from dash import Dash, Input, Output, State, callback, dcc, html, no_update
 
-import optimize as opt
-from core import auto_rod_length, simulate_flap, torque_force_ratio
+import fastmodel as fm
+import fastopt as fo
 
 PARAMS = [
     {"id": "servo-x", "name": "Servo start x", "min": 10, "max": 20, "step": 0.1, "value": 15.0},
@@ -46,6 +57,8 @@ SOFT_OPTIONS = [
     {"label": "Advantage at min angle == advantage at max angle", "value": "symmetric_ends"},
 ]
 
+N_CURVE = 201
+
 
 def _var_name(param_id):
     """Slider id ('servo-x') to optimizer variable name ('servo_x')."""
@@ -67,7 +80,7 @@ def _slider(p):
     children = [html.Label(p["name"], style={"fontWeight": "bold"})]
 
     if p.get("design", True):
-        body = html.Div(
+        children.append(html.Div(
             [
                 html.Div(row, style={"flex": "1 1 auto", "minWidth": "0"}),
                 dcc.Dropdown(
@@ -79,8 +92,7 @@ def _slider(p):
                 ),
             ],
             style={"display": "flex", "alignItems": "center", "gap": "10px"},
-        )
-        children.append(body)
+        ))
     else:
         children.extend(row)
 
@@ -105,6 +117,13 @@ app.layout = html.Div(
                             options=OBJECTIVE_OPTIONS,
                             value="none",
                             clearable=False,
+                        ),
+                        html.Button(
+                            "Apply result to sliders",
+                            id="apply-result",
+                            n_clicks=0,
+                            style={"marginTop": "10px", "padding": "8px 14px",
+                                   "fontSize": "0.95em", "width": "100%"},
                         ),
                     ]
                 ),
@@ -146,19 +165,10 @@ app.layout = html.Div(
                         ),
                     ]
                 ),
-                html.Div(
-                    [
-                        html.Button(
-                            "Run optimization",
-                            id="run-optimize",
-                            n_clicks=0,
-                            style={"padding": "10px 20px", "fontSize": "1em"},
-                        ),
-                        dcc.Loading(
-                            html.Div(id="optimize-status", style={"paddingTop": "10px"}),
-                            type="dot",
-                        ),
-                    ]
+                dcc.Loading(
+                    html.Div(id="optimize-status"),
+                    type="dot",
+                    delay_show=150,
                 ),
             ],
             style={"display": "grid", "gridTemplateColumns": "1fr 1fr 1fr",
@@ -179,17 +189,11 @@ app.layout = html.Div(
             style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "20px"},
         ),
         html.Div(id="angle-display", style={"padding": "10px", "fontSize": "1.2em"}),
+        # Geometry actually being plotted: the sliders, or the optimizer's answer.
+        dcc.Store(id="geometry"),
     ],
     style={"maxWidth": "1400px", "margin": "0 auto"},
 )
-
-
-@callback(
-    Output("run-optimize", "disabled"),
-    Input("objective", "value"),
-)
-def toggle_run_button(objective):
-    return objective == "none"
 
 
 @callback(
@@ -203,46 +207,63 @@ def toggle_min_angle(enabled):
 
 
 @callback(
-    [Output(p["id"], "value") for p in DESIGN_PARAMS],
+    Output("geometry", "data"),
     Output("optimize-status", "children"),
-    Input("run-optimize", "n_clicks"),
-    [State(p["id"], "value") for p in DESIGN_PARAMS],
-    [State(f"{p['id']}-constraint", "value") for p in DESIGN_PARAMS],
-    State("objective", "value"),
-    State("soft-constraints", "value"),
-    State("min-angle-enable", "value"),
-    State("min-angle", "value"),
-    running=[(Output("run-optimize", "disabled"), True, False)],
-    prevent_initial_call=True,
+    [Input(p["id"], "value") for p in DESIGN_PARAMS],
+    [Input(f"{p['id']}-constraint", "value") for p in DESIGN_PARAMS],
+    Input("objective", "value"),
+    Input("soft-constraints", "value"),
+    Input("min-angle-enable", "value"),
+    Input("min-angle", "value"),
 )
-def run_optimization(_n_clicks, *state):
+def run_optimization(*state):
     n = len(DESIGN_PARAMS)
     slider_values = state[:n]
     constraint_modes = state[n:2 * n]
     objective, soft = state[2 * n], state[2 * n + 1] or []
     angle_enabled, min_angle = state[2 * n + 2], state[2 * n + 3]
 
-    values = {_var_name(p["id"]): v for p, v in zip(DESIGN_PARAMS, slider_values)}
+    values = {_var_name(p["id"]): float(v) for p, v in zip(DESIGN_PARAMS, slider_values)}
     modes = {_var_name(p["id"]): m for p, m in zip(DESIGN_PARAMS, constraint_modes)}
-    ranges = {_var_name(p["id"]): (p["min"], p["max"]) for p in DESIGN_PARAMS}
+    ranges = {_var_name(p["id"]): (float(p["min"]), float(p["max"])) for p in DESIGN_PARAMS}
     min_max_angle = float(min_angle) if angle_enabled else None
 
-    result = opt.optimize(values, modes, ranges, objective, soft,
-                          min_max_angle=min_max_angle)
-    new_values = [round(result["values"][_var_name(p["id"])], 3) for p in DESIGN_PARAMS]
+    if objective == "none":
+        return ({"values": values, "optimized": False},
+                html.Div("Optimization off — showing the slider geometry.",
+                         style={"color": "#666"}))
 
-    return [*new_values, _optimize_status(result, objective, min_max_angle)]
+    result = fo.optimize(values, modes, ranges, objective, soft,
+                         min_max_angle=min_max_angle)
+    return ({"values": result["values"], "optimized": True},
+            _optimize_status(result, objective, min_max_angle))
+
+
+@callback(
+    [Output(p["id"], "value") for p in DESIGN_PARAMS],
+    Input("apply-result", "n_clicks"),
+    State("geometry", "data"),
+    prevent_initial_call=True,
+)
+def apply_result(_n_clicks, geometry):
+    """Copy the optimized geometry onto the sliders, on explicit request.
+
+    This is deliberately manual: the sliders anchor the '<=' and '>=' bounds, so
+    writing to them automatically would drag the constraints along with each run.
+    """
+    if not geometry or not geometry.get("optimized"):
+        return [no_update] * len(DESIGN_PARAMS)
+    values = geometry["values"]
+    return [round(values[_var_name(p["id"])], 3) for p in DESIGN_PARAMS]
 
 
 def _optimize_status(result, objective, min_max_angle=None):
     start, best = result["start_metrics"], result["best_metrics"]
     lines = [
-        html.Div(f"{result['message']}  ({result['elapsed']:.1f}s, "
-                 f"{result['n_free']} free variable(s))"),
+        html.Div(f"{result['message']}  ({result['elapsed'] * 1000:.0f} ms, "
+                 f"{result['n_free']} free variable(s))",
+                 style={"fontWeight": "bold"}),
     ]
-    if start is None or best is None:
-        lines.append(html.Div("No valid geometry to score.", style={"color": "crimson"}))
-        return lines
 
     if objective in OBJECTIVE_LABELS:
         label = OBJECTIVE_LABELS[objective]
@@ -261,14 +282,24 @@ def _optimize_status(result, objective, min_max_angle=None):
             f"{best['max_angle_deg']:.2f}°")
     style = None
     if min_max_angle:
-        met = best["max_angle_deg"] >= min_max_angle - 1e-6
+        met = best["max_angle_deg"] >= min_max_angle - 0.05
         text += f"  (need ≥ {min_max_angle:.0f}° — {'met' if met else 'NOT met'})"
         style = {"color": "green" if met else "crimson"}
     lines.append(html.Div(text, style=style))
+
+    if best["valid_fraction"] < 1.0:
+        lines.append(html.Div(
+            f"Warning: linkage cannot close over {(1 - best['valid_fraction']) * 100:.0f}%"
+            " of the servo stroke.", style={"color": "crimson"}))
+
+    lines.append(html.Div(
+        "  ".join(f"{p['name']}={best_v:.3f}"
+                  for p, best_v in zip(DESIGN_PARAMS,
+                                       (result["values"][_var_name(p["id"])]
+                                        for p in DESIGN_PARAMS))),
+        style={"paddingTop": "6px", "fontFamily": "monospace", "fontSize": "0.85em"},
+    ))
     return lines
-
-
-CURVE_INPUTS = np.linspace(0, 1, 201)
 
 
 def _flap_len(flap_x, flap_y):
@@ -285,91 +316,88 @@ def _padded(lo, hi, pad=0.05):
     return [lo - margin, hi + margin]
 
 
-def _plot_ranges(res, servo_x, servo_y, servo_travel, flap_x, flap_y):
+def _plot_ranges(theta, ratio, attach_x, attach_y, ok,
+                 servo_x, servo_y, servo_travel, flap_x, flap_y):
     """Axis ranges covering everything either plot can draw over the full sweep.
 
     Fixing these to the sweep keeps the axes still while the input cursor moves,
     since only the cursor-dependent traces would otherwise resize them.
     """
-    valid = res["valid"]
-    th = res["flap_angle_rad"][valid]
+    th = theta[ok]
     r_attach = np.hypot(flap_x, flap_y)
     flap_len = _flap_len(flap_x, flap_y)
 
-    # Hinge, servo rail, and the full attachment locus circle.
-    xs = [0.0, servo_x, servo_x + servo_travel, -r_attach, r_attach]
-    ys = [0.0, servo_y, -r_attach, r_attach]
-    # Flap tip across every angle reached, plus the neutral pose drawn when the
-    # geometry has no solution.
-    xs.append(-flap_len)
-    ys.append(0.0)
+    xs = [0.0, servo_x, servo_x + servo_travel, -r_attach, r_attach, -flap_len]
+    ys = [0.0, servo_y, -r_attach, r_attach, 0.0]
     if th.size:
         xs.extend(-flap_len * np.cos(th))
         ys.extend(flap_len * np.sin(th))
-        xs.extend(res["attach_x"][valid])
-        ys.extend(res["attach_y"][valid])
+        xs.extend(attach_x[ok])
+        ys.extend(attach_y[ok])
 
-    angles = res["flap_angle_deg"][valid]
-    ratio = torque_force_ratio(res, servo_travel)
-    ratio = ratio[np.isfinite(ratio)]
+    angles = np.degrees(th)
+    finite = ratio[ok][np.isfinite(ratio[ok])] if th.size else np.array([])
 
     return {
         "physical_x": _padded(np.min(xs), np.max(xs)),
         "physical_y": _padded(np.min(ys), np.max(ys)),
         "angle_y": _padded(np.min(angles), np.max(angles)) if angles.size else None,
-        "ratio_y": _padded(np.min(ratio), np.max(ratio)) if ratio.size else None,
+        "ratio_y": _padded(np.min(finite), np.max(finite)) if finite.size else None,
     }
 
 
 @lru_cache(maxsize=64)
 def _sweep(servo_x, servo_y, servo_travel, flap_x, flap_y):
-    """Rod length, full servo sweep, and fixed axis ranges for one geometry.
+    """Everything the plots need for one geometry.
 
-    The "Servo input" slider redraws while being dragged, and moving it does not
-    change the geometry, so all of this is cached and only the cursor index moves.
+    The "Servo input" slider redraws while being dragged and does not change the
+    geometry, so this is cached and only the cursor index moves.
     """
-    rod_length = auto_rod_length(servo_x, servo_y, servo_travel, flap_x, flap_y)
-    res = simulate_flap(
-        CURVE_INPUTS,
-        servo_x=servo_x,
-        servo_y=servo_y,
-        servo_travel=servo_travel,
-        flap_x=flap_x,
-        flap_y=flap_y,
-        rod_length=rod_length,
-    )
-    ranges = _plot_ranges(res, servo_x, servo_y, servo_travel, flap_x, flap_y)
-    return rod_length, res, ranges
+    p = np.array([servo_x, servo_y, servo_travel, flap_x, flap_y], dtype=np.float64)
+    rod_length, u, theta, ratio, ax, ay, ok = fm.display_sweep(p, N_CURVE)
+    out = (float(rod_length), np.asarray(u), np.asarray(theta), np.asarray(ratio),
+           np.asarray(ax), np.asarray(ay), np.asarray(ok))
+    ranges = _plot_ranges(out[2], out[3], out[4], out[5], out[6],
+                          servo_x, servo_y, servo_travel, flap_x, flap_y)
+    return out, ranges
 
 
 @callback(
     Output("physical-graph", "figure"),
     Output("curve-graph", "figure"),
     Output("angle-display", "children"),
-    [Input(p["id"], "value") for p in PARAMS],
+    Input("geometry", "data"),
+    Input("current-input", "value"),
 )
-def update(servo_x, servo_y, servo_travel, flap_x, flap_y, current_input):
-    rod_length, res, ranges = _sweep(servo_x, servo_y, servo_travel, flap_x, flap_y)
+def update(geometry, current_input):
+    if not geometry:
+        return no_update, no_update, no_update
+    v = geometry["values"]
+    servo_x, servo_y, servo_travel, flap_x, flap_y = (
+        v["servo_x"], v["servo_y"], v["servo_travel"], v["flap_x"], v["flap_y"])
 
-    # The 201-point grid lands on every 0.01 step, so the cursor snaps exactly.
-    current_idx = int(np.argmin(np.abs(CURVE_INPUTS - current_input)))
-    theta = float(res["flap_angle_rad"][current_idx])
-    valid = bool(res["valid"][current_idx])
+    (rod_length, u, theta, ratio, attach_x, attach_y, ok), ranges = _sweep(
+        servo_x, servo_y, servo_travel, flap_x, flap_y)
+
+    current_idx = int(np.argmin(np.abs(u - current_input)))
+    valid = bool(ok[current_idx])
 
     physical = _build_physical_figure(
-        valid, theta, res["attach_x"][current_idx], res["attach_y"][current_idx],
+        valid, float(theta[current_idx]), attach_x[current_idx], attach_y[current_idx],
         servo_x, servo_y, servo_travel, current_input, flap_x, flap_y, ranges,
     )
-    curve = _build_curve_figure(res, current_idx, servo_travel, ranges)
+    curve = _build_curve_figure(u, np.degrees(theta), ratio, ok, current_idx, ranges)
 
+    source = "optimized" if geometry.get("optimized") else "sliders"
     if valid:
         angle_text = (
             f"Servo input = {current_input:.2f}  |  "
-            f"Flap angle = {res['flap_angle_deg'][current_idx]:.2f}°  |  "
-            f"Rod length = {rod_length:.3f}"
+            f"Flap angle = {np.degrees(theta[current_idx]):.2f}°  |  "
+            f"Rod length = {rod_length:.3f}  |  showing {source} geometry"
         )
     else:
-        angle_text = f"Servo input = {current_input:.2f}  |  No valid geometry  |  Rod length = {rod_length:.3f}"
+        angle_text = (f"Servo input = {current_input:.2f}  |  No valid geometry  |  "
+                      f"Rod length = {rod_length:.3f}  |  showing {source} geometry")
 
     return physical, curve, angle_text
 
@@ -491,20 +519,19 @@ def _build_physical_figure(valid, theta, attach_x, attach_y,
                "range": ranges["physical_y"], "autorange": False},
         showlegend=True,
         margin={"l": 40, "r": 40, "t": 60, "b": 40},
+        uirevision="physical",
     )
     return fig
 
 
-def _build_curve_figure(res, current_idx, servo_travel, ranges):
-    x = res["servo_input"]
-    y = res["flap_angle_deg"]
-    valid = res["valid"]
-    ratio = torque_force_ratio(res, servo_travel)
+def _build_curve_figure(u, angle_deg, ratio, ok, current_idx, ranges):
+    y = np.where(ok, angle_deg, np.nan)
+    r = np.where(ok, ratio, np.nan)
 
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=x,
+            x=u,
             y=y,
             mode="lines",
             line={"color": "blue", "width": 2},
@@ -514,8 +541,8 @@ def _build_curve_figure(res, current_idx, servo_travel, ranges):
     )
     fig.add_trace(
         go.Scatter(
-            x=x,
-            y=ratio,
+            x=u,
+            y=r,
             mode="lines",
             line={"color": "orange", "width": 2},
             name="Torque / servo force",
@@ -523,21 +550,21 @@ def _build_curve_figure(res, current_idx, servo_travel, ranges):
             connectgaps=False,
         )
     )
-    if valid[current_idx]:
+    if ok[current_idx]:
         fig.add_trace(
             go.Scatter(
-                x=[x[current_idx]],
+                x=[u[current_idx]],
                 y=[y[current_idx]],
                 mode="markers",
                 marker={"color": "red", "size": 12},
                 name="Current input",
             )
         )
-        if np.isfinite(ratio[current_idx]):
+        if np.isfinite(r[current_idx]):
             fig.add_trace(
                 go.Scatter(
-                    x=[x[current_idx]],
-                    y=[ratio[current_idx]],
+                    x=[u[current_idx]],
+                    y=[r[current_idx]],
                     mode="markers",
                     marker={"color": "darkorange", "size": 12},
                     name="Current ratio",
@@ -562,8 +589,14 @@ def _build_curve_figure(res, current_idx, servo_travel, ranges):
         },
         legend={"orientation": "h", "y": -0.2},
         margin={"l": 40, "r": 60, "t": 60, "b": 40},
+        uirevision="curve",
     )
     return fig
+
+
+# XLA compilation of the solver takes ~18 s.  Doing it in the background lets the
+# page load immediately; the first optimization simply waits for it to finish.
+threading.Thread(target=fo.warmup, daemon=True).start()
 
 
 if __name__ == "__main__":
