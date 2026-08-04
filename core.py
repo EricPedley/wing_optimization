@@ -131,6 +131,68 @@ def _solve_theta(inputs: np.ndarray,
     return theta
 
 
+def _endpoint_angle_sum(rod_length: float,
+                        servo_x: float, servo_y: float, servo_travel: float,
+                        flap_x: float, flap_y: float,
+                        grid_points: int = 200) -> float:
+    """Return θ(0) + θ(1) for the continuous branch; inf if no real solution."""
+    res = simulate_flap([0.0, 1.0], servo_x, servo_y, servo_travel,
+                        flap_x, flap_y, rod_length, grid_points=grid_points)
+    t0, t1 = res["flap_angle_rad"]
+    if np.isnan(t0) or np.isnan(t1):
+        return float("inf")
+    return float(t0 + t1)
+
+
+def auto_rod_length(servo_x: float, servo_y: float, servo_travel: float,
+                    flap_x: float, flap_y: float,
+                    samples: int = 50,
+                    grid_points: int = 200) -> float:
+    """Compute rod length so θ(0) ≈ -θ(1) (symmetric flap range about 0°)."""
+    r = np.hypot(flap_x, flap_y)
+    u_grid = np.linspace(0, 1, 50)
+    d_grid = np.hypot(servo_x + u_grid * servo_travel, servo_y)
+
+    L_low = float(np.max(np.abs(d_grid - r)))
+    L_high = float(np.min(d_grid + r))
+    if not (L_low < L_high):
+        return (L_low + L_high) * 0.5
+
+    Ls = np.linspace(L_low, L_high, samples)
+    f = np.full(samples, np.nan)
+    for i, L in enumerate(Ls):
+        f[i] = _endpoint_angle_sum(L, servo_x, servo_y, servo_travel,
+                                   flap_x, flap_y, grid_points=grid_points)
+
+    # Find a sign-change bracket and refine with brentq.
+    best_abs = float("inf")
+    best_idx = None
+    for i in range(samples - 1):
+        if np.isnan(f[i]) or np.isnan(f[i + 1]):
+            continue
+        if abs(f[i]) < best_abs:
+            best_abs = abs(f[i])
+            best_idx = i
+        if abs(f[i + 1]) < best_abs:
+            best_abs = abs(f[i + 1])
+            best_idx = i + 1
+        if f[i] * f[i + 1] <= 0.0:
+            try:
+                return brentq(
+                    lambda L: _endpoint_angle_sum(L, servo_x, servo_y, servo_travel,
+                                                  flap_x, flap_y, grid_points=grid_points),
+                    float(Ls[i]),
+                    float(Ls[i + 1]),
+                    xtol=1e-6,
+                )
+            except ValueError:
+                pass
+
+    if best_idx is not None:
+        return float(Ls[best_idx])
+    return (L_low + L_high) * 0.5
+
+
 def simulate_flap(inputs: FloatArray,
                   servo_x: float,
                   servo_y: float,
@@ -139,7 +201,8 @@ def simulate_flap(inputs: FloatArray,
                   flap_y: float,
                   rod_length: float,
                   initial_angle: float = 0.0,
-                  angle_bounds=(-np.pi, np.pi)) -> dict:
+                  angle_bounds=(-np.pi, np.pi),
+                  grid_points: int = 600) -> dict:
     """Compute flap angle and geometry for given servo inputs.
 
     Parameters
@@ -176,7 +239,7 @@ def simulate_flap(inputs: FloatArray,
     theta = _solve_theta(
         u_sorted, servo_x, servo_y, servo_travel,
         flap_x, flap_y, rod_length, initial_angle,
-        angle_bounds=angle_bounds,
+        angle_bounds=angle_bounds, grid_points=grid_points,
     )
 
     Sx_sorted = servo_x + u_sorted * servo_travel

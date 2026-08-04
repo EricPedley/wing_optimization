@@ -4,7 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, callback, dcc, html
 
-from core import simulate_flap
+from core import auto_rod_length, simulate_flap
 
 PARAMS = [
     {"id": "servo-x", "name": "Servo start x", "min": 0, "max": 20, "step": 0.1, "value": 5.0},
@@ -12,7 +12,6 @@ PARAMS = [
     {"id": "servo-travel", "name": "Servo travel x", "min": 5, "max": 15, "step": 0.1, "value": 5.0},
     {"id": "flap-x", "name": "Flap attach x", "min": 0, "max": 40, "step": 0.1, "value": 5.0},
     {"id": "flap-y", "name": "Flap attach y", "min": 5, "max": 30, "step": 0.1, "value": 5.0},
-    {"id": "rod-length", "name": "Rod length", "min": 10, "max": 40, "step": 0.05, "value": 10.44},
     {"id": "current-input", "name": "Servo input", "min": 0, "max": 1, "step": 0.01, "value": 0.0},
 ]
 
@@ -61,7 +60,9 @@ app.layout = html.Div(
     Output("angle-display", "children"),
     [Input(p["id"], "value") for p in PARAMS],
 )
-def update(servo_x, servo_y, servo_travel, flap_x, flap_y, rod_length, current_input):
+def update(servo_x, servo_y, servo_travel, flap_x, flap_y, current_input):
+    rod_length = auto_rod_length(servo_x, servo_y, servo_travel, flap_x, flap_y)
+
     curve_inputs = np.linspace(0, 1, 201)
     all_inputs = np.sort(np.unique(np.concatenate([curve_inputs, [current_input]])))
 
@@ -86,9 +87,13 @@ def update(servo_x, servo_y, servo_travel, flap_x, flap_y, rod_length, current_i
     curve = _build_curve_figure(res, current_idx)
 
     if valid:
-        angle_text = f"Servo input = {current_input:.2f}  |  Flap angle = {res['flap_angle_deg'][current_idx]:.2f}°"
+        angle_text = (
+            f"Servo input = {current_input:.2f}  |  "
+            f"Flap angle = {res['flap_angle_deg'][current_idx]:.2f}°  |  "
+            f"Rod length = {rod_length:.3f}"
+        )
     else:
-        angle_text = f"Servo input = {current_input:.2f}  |  No valid geometry for these parameters"
+        angle_text = f"Servo input = {current_input:.2f}  |  No valid geometry  |  Rod length = {rod_length:.3f}"
 
     return physical, curve, angle_text
 
