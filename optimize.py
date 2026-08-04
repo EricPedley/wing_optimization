@@ -32,6 +32,9 @@ SCORED_OBJECTIVES = ("area", "peak", "min")
 # Weight on each enabled soft constraint, and on losing part of the servo sweep.
 PENALTY_WEIGHT = 1.0
 INVALID_WEIGHT = 10.0
+# The minimum-flap-angle requirement is a real constraint rather than a
+# preference, so it outweighs any objective gain a shortfall could buy.
+ANGLE_WEIGHT = 20.0
 
 
 def var_bounds(mode, value, lo, hi):
@@ -77,6 +80,9 @@ def evaluate(servo_x, servo_y, servo_travel, flap_x, flap_y,
         "min": float(np.min(mag)),
         "theta_at_peak": float(th[peak_i]),
         "angle_span": float(th[hi_i] - th[lo_i]),
+        # Largest deflection magnitude the linkage reaches, in degrees.  Taken
+        # as |theta| so the measure does not depend on which way the flap swings.
+        "max_angle_deg": float(np.degrees(np.max(np.abs(th)))),
         "mag_at_min_angle": float(mag[lo_i]),
         "mag_at_max_angle": float(mag[hi_i]),
         "valid_fraction": float(ok.sum()) / n_samples,
@@ -98,7 +104,17 @@ def _penalties(m, soft):
     return total
 
 
-def _cost(m, objective, soft, ref):
+def _angle_penalty(m, min_max_angle):
+    """One-sided shortfall against the required peak flap angle, in relative terms."""
+    if not min_max_angle:
+        return 0.0
+    s = max(0.0, min_max_angle - m["max_angle_deg"]) / min_max_angle
+    # Linear term as well as quadratic: a purely quadratic penalty flattens out
+    # at the boundary, which leaves the optimizer parked just short of target.
+    return s + s ** 2
+
+
+def _cost(m, objective, soft, ref, min_max_angle=None):
     """Scalar cost to minimize.  ``ref`` normalizes the objective term."""
     if m is None:
         return 1e6
@@ -107,11 +123,12 @@ def _cost(m, objective, soft, ref):
     return (
         -score
         + PENALTY_WEIGHT * _penalties(m, soft)
+        + ANGLE_WEIGHT * _angle_penalty(m, min_max_angle)
         + INVALID_WEIGHT * (1.0 - m["valid_fraction"])
     )
 
 
-def optimize(values, modes, ranges, objective, soft,
+def optimize(values, modes, ranges, objective, soft, min_max_angle=None,
              maxfev: int = 400, scan_points: int = 80):
     """Search for a better geometry.
 
@@ -127,6 +144,8 @@ def optimize(values, modes, ranges, objective, soft,
         One of ``OBJECTIVES``.
     soft : sequence of str
         Enabled soft constraints: ``peak_at_zero``, ``symmetric_ends``.
+    min_max_angle : float or None
+        If set, the peak flap angle (degrees) the linkage must reach.
 
     Returns
     -------
@@ -158,7 +177,7 @@ def optimize(values, modes, ranges, objective, soft,
         cand = dict(base)
         for k, xi, (lo, hi) in zip(free, x, bounds):
             cand[k] = float(np.clip(xi, lo, hi))
-        return _cost(evaluate(**cand), objective, soft, ref)
+        return _cost(evaluate(**cand), objective, soft, ref, min_max_angle)
 
     # Clamp the start into its bounds; a 'le'/'ge' mode makes the slider value
     # itself an endpoint, which Powell tolerates fine.
@@ -183,9 +202,9 @@ def optimize(values, modes, ranges, objective, soft,
     best_metrics = evaluate(**best)
 
     # Powell can return a point worse than the start if the surface is rough.
-    if best_metrics is None or _cost(best_metrics, objective, soft, ref) > _cost(
-        start_metrics, objective, soft, ref
-    ):
+    if best_metrics is None or _cost(
+        best_metrics, objective, soft, ref, min_max_angle
+    ) > _cost(start_metrics, objective, soft, ref, min_max_angle):
         best, best_metrics = base, start_metrics
         msg = f"No improvement found ({scan.shape[0] + result.nfev} evals)."
     else:

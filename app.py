@@ -112,6 +112,33 @@ app.layout = html.Div(
                             value=[],
                             labelStyle={"display": "block"},
                         ),
+                        html.Div(
+                            [
+                                dcc.Checklist(
+                                    id="min-angle-enable",
+                                    options=[{"label": "Min. peak flap angle (°)",
+                                              "value": "on"}],
+                                    value=[],
+                                    style={"whiteSpace": "nowrap"},
+                                ),
+                                html.Div(
+                                    dcc.Slider(
+                                        id="min-angle",
+                                        min=10,
+                                        max=45,
+                                        step=1,
+                                        value=20,
+                                        marks={10: "10", 45: "45"},
+                                        tooltip={"placement": "bottom",
+                                                 "always_visible": False},
+                                    ),
+                                    id="min-angle-wrap",
+                                    style={"flex": "1 1 auto", "minWidth": "0"},
+                                ),
+                            ],
+                            style={"display": "flex", "alignItems": "center",
+                                   "gap": "10px", "paddingTop": "5px"},
+                        ),
                     ]
                 ),
                 html.Div(
@@ -156,6 +183,16 @@ def toggle_run_button(objective):
 
 
 @callback(
+    Output("min-angle", "disabled"),
+    Output("min-angle-wrap", "className"),
+    Input("min-angle-enable", "value"),
+)
+def toggle_min_angle(enabled):
+    on = bool(enabled)
+    return not on, "" if on else "slider-off"
+
+
+@callback(
     [Output(p["id"], "value") for p in DESIGN_PARAMS],
     Output("optimize-status", "children"),
     Input("run-optimize", "n_clicks"),
@@ -163,6 +200,8 @@ def toggle_run_button(objective):
     [State(f"{p['id']}-constraint", "value") for p in DESIGN_PARAMS],
     State("objective", "value"),
     State("soft-constraints", "value"),
+    State("min-angle-enable", "value"),
+    State("min-angle", "value"),
     running=[(Output("run-optimize", "disabled"), True, False)],
     prevent_initial_call=True,
 )
@@ -171,18 +210,21 @@ def run_optimization(_n_clicks, *state):
     slider_values = state[:n]
     constraint_modes = state[n:2 * n]
     objective, soft = state[2 * n], state[2 * n + 1] or []
+    angle_enabled, min_angle = state[2 * n + 2], state[2 * n + 3]
 
     values = {_var_name(p["id"]): v for p, v in zip(DESIGN_PARAMS, slider_values)}
     modes = {_var_name(p["id"]): m for p, m in zip(DESIGN_PARAMS, constraint_modes)}
     ranges = {_var_name(p["id"]): (p["min"], p["max"]) for p in DESIGN_PARAMS}
+    min_max_angle = float(min_angle) if angle_enabled else None
 
-    result = opt.optimize(values, modes, ranges, objective, soft)
+    result = opt.optimize(values, modes, ranges, objective, soft,
+                          min_max_angle=min_max_angle)
     new_values = [round(result["values"][_var_name(p["id"])], 3) for p in DESIGN_PARAMS]
 
-    return [*new_values, _optimize_status(result, objective)]
+    return [*new_values, _optimize_status(result, objective, min_max_angle)]
 
 
-def _optimize_status(result, objective):
+def _optimize_status(result, objective, min_max_angle=None):
     start, best = result["start_metrics"], result["best_metrics"]
     lines = [
         html.Div(f"{result['message']}  ({result['elapsed']:.1f}s, "
@@ -204,6 +246,15 @@ def _optimize_status(result, objective):
         f"{start['mag_at_max_angle']:.2f} → {best['mag_at_min_angle']:.2f}/"
         f"{best['mag_at_max_angle']:.2f}"
     ))
+
+    text = (f"Peak flap angle: {start['max_angle_deg']:.2f}° → "
+            f"{best['max_angle_deg']:.2f}°")
+    style = None
+    if min_max_angle:
+        met = best["max_angle_deg"] >= min_max_angle - 1e-6
+        text += f"  (need ≥ {min_max_angle:.0f}° — {'met' if met else 'NOT met'})"
+        style = {"color": "green" if met else "crimson"}
+    lines.append(html.Div(text, style=style))
     return lines
 
 

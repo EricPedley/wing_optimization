@@ -1,0 +1,14 @@
+/* Applied to a slider's wrapper when its enabling checkbox is unchecked:
+   grey the whole control out and remove the draggable handle entirely. */
+.slider-off {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+.slider-off .rc-slider-handle {
+    display: none;
+}
+
+.slider-off .rc-slider-track {
+    background-color: #bbb;
+}
