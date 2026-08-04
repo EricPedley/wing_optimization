@@ -7,11 +7,11 @@ from dash import Dash, Input, Output, callback, dcc, html
 from core import auto_rod_length, simulate_flap
 
 PARAMS = [
-    {"id": "servo-x", "name": "Servo start x", "min": 0, "max": 20, "step": 0.1, "value": 5.0},
-    {"id": "servo-y", "name": "Servo y", "min": 0, "max": 20, "step": 0.1, "value": 8.0},
-    {"id": "servo-travel", "name": "Servo travel x", "min": 5, "max": 15, "step": 0.1, "value": 5.0},
-    {"id": "flap-x", "name": "Flap attach x", "min": 0, "max": 40, "step": 0.1, "value": 5.0},
-    {"id": "flap-y", "name": "Flap attach y", "min": 5, "max": 30, "step": 0.1, "value": 5.0},
+    {"id": "servo-x", "name": "Servo start x", "min": 0, "max": 20, "step": 0.1, "value": 15.0},
+    {"id": "servo-y", "name": "Servo y", "min": 0, "max": 20, "step": 0.1, "value": 6.0},
+    {"id": "servo-travel", "name": "Servo travel x", "min": 5, "max": 15, "step": 0.1, "value": 9.0},
+    {"id": "flap-x", "name": "Flap attach x", "min": 0, "max": 20, "step": 0.1, "value": 0.0},
+    {"id": "flap-y", "name": "Flap attach y", "min": 5, "max": 10, "step": 0.1, "value": 10.0},
     {"id": "current-input", "name": "Servo input", "min": 0, "max": 1, "step": 0.01, "value": 0.0},
 ]
 
