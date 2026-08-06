@@ -53,20 +53,33 @@ G = 9.81             # m/s^2
 # downstream of THRUST_PER_MOTOR should be treated as provisional until it is.
 
 SPAN = 0.256                 # m, capped by the 3D printer bed
-AVIONICS_MASS = 0.025        # kg, FC + RX + battery + servos
-PROPULSION_MASS = 0.012      # kg, 2x (motor + ESC + prop), estimated
+FIXED_MASS = 0.025           # kg, FC + RX + battery + servos + motors + ESC + props
 THRUST_PER_MOTOR = 0.035     # kgf, ~35 g.  UNMEASURED -- see note above.
 PROP_DIAMETER = 0.051        # m, 2 inch
 
 BATTERY_LENGTH = 0.065       # m, drives the minimum root chord
-BATTERY_THICKNESS = 0.011    # m, drives the minimum root thickness
-SERVO_THICKNESS = 0.008      # m, servo body depth at the hinge line
+MIN_ROOT_THICKNESS = 0.015   # m, drives the minimum root thickness
 
-# Section thickness at the hinge line as a fraction of maximum thickness.  A
-# typical section has its maximum thickness near 30% chord and has thinned to
-# roughly half of it by 75% chord, where the elevon hinge sits.  This factor is
-# what makes the servo rather than the battery the binding volume constraint.
-HINGE_THICKNESS_FRACTION = 0.5
+# The servo is a box, and which of its dimensions binds depends on how it is
+# mounted, so all three are named separately rather than collapsed into one
+# "servo thickness".  Dimensions below are from CAD.  SERVO_LENGTH runs along
+# the chord when the servo is mounted conventionally; SERVO_DEPTH is the
+# dimension that has to fit inside the section thickness.
+#
+# At 15 mm deep this servo is nearly as thick as the whole root section, so it
+# is the dominant packaging constraint and the reason servo_station is a design
+# variable: it only fits near maximum thickness, and it may not fit at all
+# without either a deeper root or mounting it on its side.
+SERVO_LENGTH = 0.021         # m, longest dimension, lies along the chord
+SERVO_DEPTH = 0.015          # m, the dimension that fights section thickness
+SERVO_WIDTH = 0.015          # m, spanwise
+
+# Section thickness profile.  A typical section reaches maximum thickness near
+# 30% chord and thins toward the trailing edge roughly as a quadratic.  This is
+# what makes servo *chordwise position* matter: the same servo needs far less
+# root thickness at 45% chord than at the hinge line, which is the whole reason
+# to consider moving it forward.
+MAX_THICKNESS_STATION = 0.30
 
 # Printed as a hollow shell, so skin mass is wall thickness times material
 # density.  Set FILAMENT_DENSITY to the *as-printed* density, not the spool
@@ -378,30 +391,75 @@ def wing_mass(root_chord, tip_chord, root_thickness, tip_thickness):
 def total_mass(root_chord, tip_chord, root_thickness, tip_thickness):
     """All-up mass, in kg."""
     return (wing_mass(root_chord, tip_chord, root_thickness, tip_thickness)
-            + AVIONICS_MASS + PROPULSION_MASS)
+            + FIXED_MASS)
 
 
-def volume_slack(root_chord, root_thickness):
-    """How much room the root section has beyond what the avionics need, in m.
+def thickness_at(x, max_thickness):
+    """Section thickness at chord fraction ``x``, given the maximum thickness.
 
-    Positive means the battery and servos fit.  The battery is the binding item
-    on thickness and its length is what sets the minimum root chord; the servo
-    needs its own depth at the hinge line, which sits further aft where the
-    section is thinner, so it is checked separately.
+    A crude but adequate profile: thickness rises from zero at the leading edge
+    to its maximum at MAX_THICKNESS_STATION, then falls roughly quadratically to
+    near zero at the trailing edge.  Only the aft branch matters for packaging,
+    since everything competing for space sits behind the leading edge.
+
+    This is what makes servo chordwise position a real design variable rather
+    than a detail: at 45% chord a section is still near full thickness, while at
+    the 75% hinge line it has thinned by half.
+    """
+    fore = x / MAX_THICKNESS_STATION
+    aft = 1.0 - ((x - MAX_THICKNESS_STATION) / (1.0 - MAX_THICKNESS_STATION)) ** 2
+    shape = jnp.where(x < MAX_THICKNESS_STATION, fore, aft)
+    return max_thickness * jnp.clip(shape, 0.0, 1.0)
+
+
+def servo_slack(root_chord, root_thickness, servo_station, x_hinge):
+    """Room around the servo at its chordwise station, in m.
+
+    ``servo_station`` is the chord fraction where the servo body is centred.
+    Positive return means it fits.  Two things are checked: the section is deep
+    enough for the servo where it actually sits, and the servo body plus its
+    pushrod run fit between that station and the hinge.
+
+    Moving the servo forward relaxes the depth constraint quickly, because
+    section thickness aft of maximum falls off quadratically.  It does not come
+    free -- the pushrod gets longer and drives the horn increasingly off-axis,
+    which shows up as varying mechanical advantage over the stroke -- but that
+    cost belongs to the linkage model, not here.  What this function reports is
+    the packaging half of the trade.
+    """
+    depth_available = thickness_at(servo_station, root_thickness)
+    depth_slack = depth_available - SERVO_DEPTH
+
+    # The servo body occupies chord centred on its station; the hinge must be
+    # far enough aft that the body does not run into it.
+    body_aft_edge = (servo_station + 0.5 * SERVO_LENGTH / root_chord)
+    clearance_slack = (x_hinge - body_aft_edge) * root_chord
+
+    return jnp.minimum(depth_slack, clearance_slack)
+
+
+def pushrod_length(root_chord, servo_station, x_hinge):
+    """Chordwise distance from the servo output to the hinge line, in m.
+
+    The quantity the linkage model needs: a longer run means the horn is driven
+    further off-axis, so mechanical advantage varies more across the stroke.
+    """
+    return (x_hinge - servo_station) * root_chord
+
+
+def volume_slack(root_chord, root_thickness, servo_station=0.45, x_hinge=0.75):
+    """How much room the root section has beyond what it must hold, in m.
+
+    Positive means the battery and servos fit.  The battery sets a floor on both
+    root chord and root thickness; the servo is checked at its own chordwise
+    station rather than at the hinge line, since where it sits is a design
+    choice with real consequences for how thick the centre section must be.
     """
     chord_slack = root_chord - BATTERY_LENGTH
-    thickness_slack = root_thickness - BATTERY_THICKNESS
+    thickness_slack = root_thickness - MIN_ROOT_THICKNESS
+    servo = servo_slack(root_chord, root_thickness, servo_station, x_hinge)
 
-    # The servo sits at the hinge line, well aft of maximum thickness, where the
-    # section has thinned considerably.  This is what actually binds: the
-    # battery fits in 12 mm of root thickness, but the servo needs 8 mm at the
-    # hinge, which for a section thinned to about half its maximum by that
-    # station demands 16 mm at the root.  Every millimetre of servo depth
-    # therefore costs two millimetres of root thickness.
-    hinge_thickness = root_thickness * HINGE_THICKNESS_FRACTION
-    servo_slack = hinge_thickness - SERVO_THICKNESS
-
-    return jnp.minimum(jnp.minimum(chord_slack, thickness_slack), servo_slack)
+    return jnp.minimum(jnp.minimum(chord_slack, thickness_slack), servo)
 
 
 # --- Flight conditions --------------------------------------------------------
@@ -428,12 +486,13 @@ def cruise_lift_coefficient(mass_kg, area, v_inf):
 
 
 DESIGN_VARS = ["root_chord", "tip_chord", "root_thickness", "tip_thickness",
-               "x_hinge", "elevon_inboard_frac", "motor_frac"]
+               "x_hinge", "elevon_inboard_frac", "motor_frac", "servo_station"]
 
 
 def unpack(p):
     """Design vector to named geometry, with span fractions turned into metres."""
-    root_chord, tip_chord, root_t, tip_t, x_hinge, elevon_in_f, motor_f = p
+    (root_chord, tip_chord, root_t, tip_t, x_hinge, elevon_in_f, motor_f,
+     servo_station) = p
     semi = 0.5 * SPAN
     return {
         "root_chord": root_chord,
@@ -444,6 +503,7 @@ def unpack(p):
         "elevon_inboard_y": elevon_in_f * semi,
         "elevon_outboard_y": semi,
         "motor_y": motor_f * semi,
+        "servo_station": servo_station,
     }
 
 
@@ -502,7 +562,13 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "re_tip": reynolds(v_stall, g["tip_chord"]),
         "root_tc": g["root_thickness"] / jnp.maximum(g["root_chord"], 1e-9),
         "tip_tc": g["tip_thickness"] / jnp.maximum(g["tip_chord"], 1e-9),
-        "volume_slack": volume_slack(g["root_chord"], g["root_thickness"]),
+        "volume_slack": volume_slack(
+            g["root_chord"], g["root_thickness"],
+            g["servo_station"], g["x_hinge"]),
+        "servo_depth_available": thickness_at(
+            g["servo_station"], g["root_thickness"]),
+        "pushrod_length": pushrod_length(
+            g["root_chord"], g["servo_station"], g["x_hinge"]),
         "yaw_moment": yaw_moment(0.5 * thrust_hover, g["motor_y"]),
         "wash_fraction": washed_span_fraction(
             g["motor_y"], g["elevon_inboard_y"], g["elevon_outboard_y"]),
@@ -515,17 +581,18 @@ evaluate_jit = jax.jit(evaluate, static_argnames=())
 
 
 # Current best guess at the configuration, in DESIGN_VARS order.  Root chord is
-# well above the 75 mm the battery alone would need, because the servo forces
-# 16 mm of root thickness and a longer chord is what keeps that from being an
-# unflyable thickness ratio at this Reynolds number.
+# above the 65 mm the battery alone would need, mostly to keep the thickness
+# ratio sane at this Reynolds number once the section is deep enough to hold
+# everything.
 BASELINE = jnp.array([
     0.105,   # root_chord, m
     0.074,   # tip_chord, m  (taper 0.70; less taper keeps tip Re up)
-    0.016,   # root_thickness, m  (set by servo depth at the hinge)
+    0.016,   # root_thickness, m
     0.006,   # tip_thickness, m
     0.75,    # x_hinge  (25% chord elevon, where dCm/deta peaks)
     0.30,    # elevon_inboard_frac
     0.47,    # motor_frac
+    0.45,    # servo_station, chord fraction where the servo body sits
 ])
 
 
@@ -563,10 +630,27 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
     slack = float(r['volume_slack']) * 1e3
     print(f"  volume slack    {slack:+8.1f} mm"
           f"   {'FITS' if slack >= 0 else 'DOES NOT FIT'}")
-    print(f"    battery needs {BATTERY_LENGTH * 1e3:.0f} mm chord,"
-          f" {BATTERY_THICKNESS * 1e3:.0f} mm thickness")
-    print(f"    servo needs   {SERVO_THICKNESS * 1e3:.0f} mm at the hinge,"
-          f" so {SERVO_THICKNESS / HINGE_THICKNESS_FRACTION * 1e3:.0f} mm at the root")
+
+    # Report every packaging constraint with its own slack, so the binding one
+    # is visible rather than hidden inside a single minimum.  Which one binds
+    # moves around as the servo station and root chord change, and knowing
+    # which is what tells you what to go fix.
+    rc = float(g["root_chord"])
+    rt = float(g["root_thickness"])
+    terms = {
+        "battery chord": rc - BATTERY_LENGTH,
+        "min thickness": rt - MIN_ROOT_THICKNESS,
+        "servo depth": float(r["servo_depth_available"]) - SERVO_DEPTH,
+        "servo/hinge clearance": (
+            float(g["x_hinge"]) - float(g["servo_station"])
+            - 0.5 * SERVO_LENGTH / rc) * rc,
+    }
+    binding = min(terms, key=terms.get)
+    for name, value in terms.items():
+        mark = "  <-- binding" if name == binding else ""
+        print(f"    {name:<22}{value * 1e3:+7.1f} mm{mark}")
+    print(f"    servo at {float(g['servo_station']) * 100:.0f}% chord,"
+          f" pushrod run {float(r['pushrod_length']) * 1e3:.1f} mm to the hinge")
 
     print("\n=== Elevon and motors ===")
     print(f"  hinge at        {float(g['x_hinge']) * 100:8.0f} % chord"
