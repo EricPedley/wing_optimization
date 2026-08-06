@@ -1,0 +1,45 @@
+family,product,density_g_cm3,tensile_strength_xy_mpa,hdt_0p45mpa_c,vicat_softening_c,charpy_notched_xy_kj_m2
+Functional PLA,PolyLite PLA,1.17,52.3,60,63,3.3
+Functional PLA,PolyLite PLA Pro,1.23,49.8,59,63,17.1
+Functional PLA,Polymaker PLA Pro,1.237,39.93,58.1,63.5,20.76
+Functional PLA,PolyMax PLA,1.2,41.3,55,62,38.9
+Functional PLA,PolySonic PLA,1.23,46,53,61,5
+Functional PLA,LW-PLA,0.9,24.4,54,60,2.4
+Functional PLA,PLA-CF,1.29,31.2,54,64,5.5
+Functional PLA,HT-PLA (unannealed),1.287,42.86,61.4,156.2,4.94
+Functional PLA,HT-PLA (annealed),1.287,42.86,107.2,155.2,4.67
+Functional PLA,HT-PLA-GF (unannealed),1.337,50.09,75.5,148.9,5.31
+Functional PLA,HT-PLA-GF (annealed),1.337,50.2,114.7,148.3,4.92
+Functional PLA,HT-PLA Pro (unannealed),1.24,37.6,56.3,148.3,9.94
+Functional PLA,HT-PLA Pro (annealed),1.24,38.2,107.6,150.5,10.1
+Panchroma PLA,Basic Colors,1.32,40.4,,62,6.76
+Panchroma PLA,Matte,1.37,23.2,,62,10
+Panchroma PLA,Satin,1.24,31.1,,62,6.7
+Panchroma PLA,Silk,1.24,41.1,,64.7,13.8
+Panchroma PLA,Others,1.17,52.3,,63,3.3
+PET/PETG,Polymaker PETG,1.3,47.96,69,75,4.95
+PET/PETG,PolyLite PETG,1.25,50.8,78,84,2.6
+PET/PETG,PolyMax PETG,1.24,37.9,76,82,11.6
+PET/PETG,Fiberon PETG-rCF08,1.3,59.8,68.6,81.6,4
+PET/PETG,Fiberon PETG-ESD,1.24,36.1,76,81.6,5.7
+PET/PETG,Fiberon PET-CF17 (annealed),1.34,65.9,147.5,238.4,5.1
+PET/PETG,Fiberon PET-GF15 (annealed),1.43,59.9,133.7,232.6,8.7
+ABS/ASA,PolyLite ABS,1.04,33.4,100,104,18
+ABS/ASA,Polymaker ABS Pro,1.04,34.94,106.4,116.1,17.32
+ABS/ASA,Polymaker ABS Max,1.06,35.66,118.1,127.4,10.51
+ABS/ASA,Polymaker ASA,1.13,43.8,103,105,10.3
+ABS/ASA,Fiberon ASA-CF08,1.09,43.5,103,110.8,5.5
+Polycarbonate,PolyLite PC,1.19,69.1,111,120,4.1
+Polycarbonate,PolyMax PC,1.19,53.44,114,117,21.28
+Polycarbonate,Polymaker PC-ABS,1.1,39.9,112,135,25.8
+Nylon,PolyMide CoPA,1.12,78,111,180,6.9
+Nylon,Fiberon PA612-CF15,1.03,91.9,175,206.2,8.1
+Nylon,Fiberon PA6-CF20,1.17,109.3,215,219.2,11
+Nylon,Fiberon PA6-GF25,1.2,80.1,191,211.7,10
+Nylon,Fiberon PA12-CF10,1.06,77.4,131,170.2,9.9
+Nylon,Fiberon PA612-ESD,1.1,84.3,157,190.0,5.9
+PPS,Fiberon PPS-CF10,1.29,59.4,252.5,267.5,5.3
+PPS,Fiberon PPS-GF20,1.36,64.1,236.3,272.5,7.3
+TPU,PolyFlex TPU90,1.21,,,,
+TPU,PolyFlex TPU95,1.22,,,,
+TPU,PolyFlex TPU95-HF,1.16,,,,
