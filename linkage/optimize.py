@@ -18,7 +18,7 @@ import time
 import numpy as np
 from scipy.optimize import minimize
 
-from core import auto_rod_length, simulate_flap, torque_force_ratio
+from linkage.core import auto_rod_length, simulate_flap, torque_force_ratio
 
 DESIGN_VARS = ["servo_x", "servo_y", "servo_travel", "flap_x", "flap_y"]
 

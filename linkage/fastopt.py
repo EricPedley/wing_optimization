@@ -13,8 +13,8 @@ import jax.numpy as jnp
 import numpy as np
 from jaxopt import LBFGSB
 
-import fastmodel as fm
-from fastmodel import N_SWEEP  # noqa: F401  (re-exported for callers)
+import linkage.linkage_model as fm
+from linkage.linkage_model import N_SWEEP  # noqa: F401  (re-exported for callers)
 
 DESIGN_VARS = ["servo_x", "servo_y", "servo_travel", "flap_x", "flap_y"]
 CONSTRAINT_MODES = ["fixed", "le", "ge", "free"]

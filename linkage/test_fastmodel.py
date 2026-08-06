@@ -13,9 +13,9 @@ import pytest
 
 jnp = pytest.importorskip("jax.numpy")
 
-import fastmodel as fm  # noqa: E402
-import fastopt as fo  # noqa: E402
-from core import _endpoint_angle_sum, simulate_flap, torque_force_ratio  # noqa: E402
+import linkage.linkage_model as fm  # noqa: E402
+import linkage.fastopt as fo  # noqa: E402
+from linkage.core import _endpoint_angle_sum, simulate_flap, torque_force_ratio  # noqa: E402
 
 RANGES = {"servo_x": (10.0, 20.0), "servo_y": (0.0, 10.0),
           "servo_travel": (5.0, 15.0), "flap_x": (-5.0, 20.0),

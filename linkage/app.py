@@ -17,13 +17,13 @@ import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dcc, html, no_update
 
-import fastmodel as fm
-import fastopt as fo
+import linkage.linkage_model as fm
+import linkage.fastopt as fo
 
 PARAMS = [
-    {"id": "servo-x", "name": "Servo start x", "min": 10, "max": 20, "step": 0.1, "value": 15.0},
-    {"id": "servo-y", "name": "Servo y", "min": 0, "max": 10, "step": 0.1, "value": 6.0},
-    {"id": "servo-travel", "name": "Servo travel x", "min": 5, "max": 15, "step": 0.1, "value": 9.0},
+    {"id": "servo-x", "name": "Servo start x", "min": 10, "max": 20, "step": 0.05, "value": 15.3},
+    {"id": "servo-y", "name": "Servo y", "min": 0, "max": 10, "step": 0.05, "value": 3.55},
+    {"id": "servo-travel", "name": "Servo travel x", "min": 5, "max": 15, "step": 0.05, "value": 9.0},
     {"id": "flap-x", "name": "Flap attach x", "min": -5, "max": 20, "step": 0.1, "value": 0.0},
     {"id": "flap-y", "name": "Flap attach y", "min": 5, "max": 10, "step": 0.1, "value": 10.0},
     # Live cursor: redraws while dragging rather than on release.

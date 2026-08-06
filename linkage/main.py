@@ -1,4 +1,4 @@
-from app import app
+from linkage.app import app
 
 
 def main():
