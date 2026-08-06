@@ -64,7 +64,7 @@ MIN_ROOT_THICKNESS = 0.015   # m, drives the minimum root thickness
 # both because that is where the section is deepest and because the battery is
 # the densest single item, so its position dominates the centre of gravity --
 # and a tailsitter flying wing needs its CG forward to be stable in cruise.
-BATTERY_STATION = 0.10
+BATTERY_STATION = 0.00
 
 # The servo is a box, and which of its dimensions binds depends on how it is
 # mounted, so all three are named separately rather than collapsed into one
@@ -105,6 +105,21 @@ CONSTANT_CHORD_ELEVON = True
 # Minimum elevon chord that can actually be built: below this there is no room
 # for a hinge, a horn, and a pushrod attachment.
 MIN_ELEVON_CHORD = 0.012     # m
+
+# Thickness ratio band, from published low-Reynolds-number section data rather
+# than from anything this model computes -- nothing here predicts Cl_max against
+# thickness, so this is an imported bound of the same character as the aspect
+# ratio floor.  Between roughly Re 30,000 and 70,000 the useful range is 6-9%:
+# below about 4% the leading edge is sharp enough that stall becomes abrupt and
+# very sensitive to angle of attack, and above about 12% the laminar boundary
+# layer separates over the aft upper surface and Cl_max falls.
+#
+# Without this the optimizer drives the tip to whatever minimum thickness is
+# allowed, because thinner means less skin area means less mass means lower
+# stall speed, and nothing else pushes back.  That trades a badly behaved tip
+# section for a fraction of a gram.
+MIN_THICKNESS_RATIO = 0.06
+MAX_THICKNESS_RATIO = 0.12
 
 # Section thickness profile.  A typical section reaches maximum thickness near
 # 30% chord and thins toward the trailing edge roughly as a quadratic.  This is
@@ -421,6 +436,44 @@ def reynolds(v_inf, chord):
     return RHO * v_inf * chord / MU
 
 
+# --- Sweep --------------------------------------------------------------------
+#
+# Area and mean aerodynamic chord depend only on the chord distribution, not on
+# where the sections sit fore and aft, so nothing above needs sweep.  What sweep
+# changes is where the lift acts, which is what a stability model would use --
+# and there is not one here yet.  These functions exist so the geometry is
+# stated explicitly rather than implied by whatever the plots happen to draw,
+# and so the quarter-chord sweep is visible: with a straight leading edge and
+# taper, the quarter-chord line sweeps *forward*, which is the wrong direction
+# for a tailless aircraft.
+
+
+def leading_edge_x(span_fraction, le_sweep_deg):
+    """Leading edge position aft of the root leading edge, in m."""
+    return jnp.tan(jnp.radians(le_sweep_deg)) * span_fraction * 0.5 * SPAN
+
+
+def quarter_chord_sweep_deg(root_chord, tip_chord, le_sweep_deg):
+    """Sweep of the quarter-chord line, degrees, positive aft.
+
+    The aerodynamically meaningful sweep, since section lift acts near the
+    quarter chord.  Taper drags it forward of the leading-edge sweep: each
+    section's quarter chord sits a quarter of its own chord aft of its leading
+    edge, and outboard chords are shorter, so the quarter-chord line leans
+    forward relative to the leading edge by an amount that grows with taper.
+    """
+    semi = 0.5 * SPAN
+    dx = (leading_edge_x(1.0, le_sweep_deg) + 0.25 * tip_chord) - 0.25 * root_chord
+    return jnp.degrees(jnp.arctan2(dx, semi))
+
+
+def trailing_edge_sweep_deg(root_chord, tip_chord, le_sweep_deg):
+    """Sweep of the trailing edge, degrees, positive aft."""
+    semi = 0.5 * SPAN
+    dx = (leading_edge_x(1.0, le_sweep_deg) + tip_chord) - root_chord
+    return jnp.degrees(jnp.arctan2(dx, semi))
+
+
 def wing_mass(root_chord, tip_chord, root_thickness, tip_thickness):
     """Structural mass of a hollow printed shell, in kg.
 
@@ -633,13 +686,13 @@ def angular_acceleration(moment, inertia_value):
 
 DESIGN_VARS = ["root_chord", "tip_chord", "root_thickness", "tip_thickness",
                "x_hinge", "elevon_inboard_frac", "motor_frac", "servo_station",
-               "servo_span_frac"]
+               "servo_span_frac", "le_sweep_deg"]
 
 
 def unpack(p):
     """Design vector to named geometry, with span fractions turned into metres."""
     (root_chord, tip_chord, root_t, tip_t, x_hinge, elevon_in_f, motor_f,
-     servo_station, servo_span_f) = p
+     servo_station, servo_span_f, le_sweep_deg) = p
     semi = 0.5 * SPAN
     servo_chord, servo_thickness = local_geometry(
         root_chord, tip_chord, root_t, tip_t, servo_span_f)
@@ -657,6 +710,7 @@ def unpack(p):
         "servo_y": servo_span_f * semi,
         "servo_chord": servo_chord,
         "servo_thickness": servo_thickness,
+        "le_sweep_deg": le_sweep_deg,
     }
 
 
@@ -746,6 +800,20 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "wash_fraction": washed_span_fraction(
             g["motor_y"], g["elevon_inboard_y"], g["elevon_outboard_y"]),
         "flap_effectiveness": flap_effectiveness_ratio(g["x_hinge"]),
+        "le_sweep_deg": g["le_sweep_deg"],
+        "c4_sweep_deg": quarter_chord_sweep_deg(
+            g["root_chord"], g["tip_chord"], g["le_sweep_deg"]),
+        "te_sweep_deg": trailing_edge_sweep_deg(
+            g["root_chord"], g["tip_chord"], g["le_sweep_deg"]),
+        # Thickness ratio at both ends.  Both are needed because chord and
+        # thickness taper at different rates, so the extremes of t/c are not
+        # necessarily at the extremes of either one.
+        "min_tc": jnp.minimum(
+            g["root_thickness"] / jnp.maximum(g["root_chord"], 1e-9),
+            g["tip_thickness"] / jnp.maximum(g["tip_chord"], 1e-9)),
+        "max_tc": jnp.maximum(
+            g["root_thickness"] / jnp.maximum(g["root_chord"], 1e-9),
+            g["tip_thickness"] / jnp.maximum(g["tip_chord"], 1e-9)),
         # Elevon chord at the inboard and outboard ends of the surface, which is
         # what decides whether it can be hinged and horned at all.  Equal when
         # the elevon is constant-chord; the outboard one is the small one when
@@ -891,6 +959,11 @@ def constraints(p, cl_max=0.8, deflection_deg=10.0):
         "elevon_chord": _shortfall(
             jnp.minimum(r["elevon_chord_inboard"], r["elevon_chord_outboard"]),
             MIN_ELEVON_CHORD),
+        # Thickness ratio band.  The lower bound is what keeps the optimizer
+        # from thinning the tip into an abrupt-stalling section to save a
+        # fraction of a gram of skin.
+        "min_thickness_ratio": _shortfall(r["min_tc"], MIN_THICKNESS_RATIO),
+        "max_thickness_ratio": _excess(r["max_tc"], MAX_THICKNESS_RATIO),
     }
 
 
@@ -927,6 +1000,9 @@ BASELINE = jnp.array([
     0.47,    # motor_frac
     0.45,    # servo_station, chord fraction where the servo body sits
     0.40,    # servo_span_frac, outboard of the battery, near its elevon
+    20.0,    # le_sweep_deg, aft.  Enough to pull the quarter chord back to
+             # roughly neutral against this taper; there is no stability model
+             # here to choose it properly.
 ])
 
 
@@ -998,6 +1074,14 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
           f" {float(g['servo_span_frac']) * 100:.0f}% semi-span"
           f" ({sc * 1e3:.0f} mm local chord),"
           f" pushrod {float(r['pushrod_length']) * 1e3:.1f} mm")
+
+    print("\n=== Sweep ===")
+    c4 = float(r["c4_sweep_deg"])
+    print(f"  leading edge    {float(r['le_sweep_deg']):+8.1f} deg")
+    print(f"  quarter chord   {c4:+8.1f} deg"
+          f"   {'aft' if c4 > 0 else 'FORWARD -- destabilising for a tailless wing'}")
+    print(f"  trailing edge   {float(r['te_sweep_deg']):+8.1f} deg")
+    print("  (no stability model: sweep is reported, not chosen)")
 
     print("\n=== Elevon and motors ===")
     print(f"  hinge at        {float(g['x_hinge']) * 100:8.0f} % chord"

@@ -69,10 +69,14 @@ def planform_figure(p=None):
     eout = float(g["elevon_outboard_y"])
     motor_y = float(g["motor_y"])
 
-    # x runs aft from the leading edge, y outboard from the centreline.  Leading
-    # edge is straight, so all the taper shows up at the trailing edge.
+    # x runs aft from the root leading edge, y outboard from the centreline.
+    le_sweep = float(g["le_sweep_deg"])
+
     def chord_at(y):
         return root_c + (tip_c - root_c) * (abs(y) / semi)
+
+    def le_at(y):
+        return float(am.leading_edge_x(abs(y) / semi, le_sweep))
 
     # Hinge position, computed the same way the model does it, so the drawing
     # cannot disagree with the numbers.  With a constant-chord elevon this runs
@@ -82,19 +86,33 @@ def planform_figure(p=None):
 
     def hinge_at(y):
         c = chord_at(y)
-        return c - float(am.elevon_chord_at(c, x_hinge, mac))
+        return le_at(y) + c - float(am.elevon_chord_at(c, x_hinge, mac))
+
+    def te_at(y):
+        return le_at(y) + chord_at(y)
 
     fig = go.Figure()
 
     ys = np.linspace(-semi, semi, 200)
-    cs = np.array([chord_at(y) for y in ys])
+    les = np.array([le_at(y) for y in ys])
+    tes = np.array([te_at(y) for y in ys])
 
     fig.add_trace(go.Scatter(
         x=np.concatenate([ys, ys[::-1]]) * 1e3,
-        y=np.concatenate([np.zeros_like(ys), cs[::-1]]) * 1e3,
+        y=np.concatenate([les, tes[::-1]]) * 1e3,
         fill="toself", fillcolor="rgba(200,200,200,0.35)",
         line={"color": "black", "width": 2},
         name="Wing", hoverinfo="skip",
+    ))
+
+    # Quarter-chord line: where section lift acts, and the sweep that actually
+    # matters for a tailless aircraft.  Drawn because taper pulls it well
+    # forward of the leading-edge sweep, which is easy to miss.
+    fig.add_trace(go.Scatter(
+        x=ys * 1e3,
+        y=np.array([le_at(y) + 0.25 * chord_at(y) for y in ys]) * 1e3,
+        mode="lines", line={"color": "orange", "width": 1, "dash": "dashdot"},
+        name=f"c/4 ({float(r['c4_sweep_deg']):+.1f} deg)", hoverinfo="skip",
     ))
 
     # Hinge line, drawn only across the elevon span where it exists.
@@ -112,7 +130,7 @@ def planform_figure(p=None):
     for sign in (1, -1):
         ye = np.linspace(sign * ein, sign * eout, 40)
         hinge = np.array([hinge_at(y) for y in ye])
-        trail = np.array([chord_at(y) for y in ye])
+        trail = np.array([te_at(y) for y in ye])
         fig.add_trace(go.Scatter(
             x=np.concatenate([ye, ye[::-1]]) * 1e3,
             y=np.concatenate([hinge, trail[::-1]]) * 1e3,
@@ -129,7 +147,8 @@ def planform_figure(p=None):
         lo, hi = sign * motor_y - half_w, sign * motor_y + half_w
         fig.add_trace(go.Scatter(
             x=np.array([lo, hi, hi, lo, lo]) * 1e3,
-            y=np.array([0, 0, root_c, root_c, 0]) * 1e3,
+            y=np.array([le_at(lo), le_at(hi), te_at(hi), te_at(lo),
+                        le_at(lo)]) * 1e3,
             mode="lines", line={"color": "blue", "width": 1, "dash": "dot"},
             fill="toself", fillcolor="rgba(80,120,220,0.15)",
             name="Slipstream" if sign == 1 else None,
@@ -159,8 +178,8 @@ def planform_figure(p=None):
     for sign in (1, -1):
         y0 = sign * servo_y - 0.5 * am.SERVO_WIDTH
         y1 = sign * servo_y + 0.5 * am.SERVO_WIDTH
-        x0 = station * servo_c - 0.5 * am.SERVO_LENGTH
-        x1 = station * servo_c + 0.5 * am.SERVO_LENGTH
+        x0 = le_at(servo_y) + station * servo_c - 0.5 * am.SERVO_LENGTH
+        x1 = le_at(servo_y) + station * servo_c + 0.5 * am.SERVO_LENGTH
         fig.add_trace(go.Scatter(
             x=np.array([y0, y1, y1, y0, y0]) * 1e3,
             y=np.array([x0, x0, x1, x1, x0]) * 1e3,
@@ -178,19 +197,20 @@ def planform_figure(p=None):
         for sign in (1, -1):
             fig.add_trace(go.Scatter(
                 x=np.array([sign * limit, sign * limit]) * 1e3,
-                y=np.array([0.0, root_c]) * 1e3,
+                y=np.array([le_at(limit), te_at(limit)]) * 1e3,
                 mode="lines",
                 line={"color": colour, "width": 1, "dash": "longdash"},
                 name=label if sign == 1 else None,
                 showlegend=sign == 1, hoverinfo="skip",
             ))
 
-    # Props, drawn at the leading edge where they actually mount.
+    # Props, drawn centred on the leading edge at their spanwise station, which
+    # sweeps aft with it.
     theta = np.linspace(0, 2 * np.pi, 60)
     for sign in (1, -1):
         fig.add_trace(go.Scatter(
             x=(sign * motor_y + 0.5 * am.PROP_DIAMETER * np.cos(theta)) * 1e3,
-            y=(0.5 * am.PROP_DIAMETER * np.sin(theta)) * 1e3,
+            y=(le_at(motor_y) + 0.5 * am.PROP_DIAMETER * np.sin(theta)) * 1e3,
             mode="lines", line={"color": "blue", "width": 2},
             name="Prop disc" if sign == 1 else None,
             showlegend=sign == 1, hoverinfo="skip",
@@ -199,7 +219,8 @@ def planform_figure(p=None):
     fig.update_layout(
         title=(f"Planform  --  {float(r['area']) * 1e4:.0f} cm^2,"
                f" AR {float(r['aspect_ratio']):.2f},"
-               f" {float(r['wash_fraction']) * 100:.0f}% of elevon blown"),
+               f" LE sweep {le_sweep:+.0f} deg,"
+               f" c/4 {float(r['c4_sweep_deg']):+.1f} deg"),
         xaxis={"title": "span, mm"},
         # Aft is down: the wing is drawn as seen from above with the leading
         # edge at the top, which is how the planform is normally read.

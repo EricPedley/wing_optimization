@@ -53,6 +53,12 @@ BOUNDS = {
     "motor_frac": (0.20, am.MAX_MOTOR_Y / (0.5 * am.SPAN)),
     "servo_station": (0.20, 0.70),
     "servo_span_frac": (0.15, am.MAX_SERVO_Y / (0.5 * am.SPAN)),
+    # Leading-edge sweep.  Nothing in the objective rewards or penalizes it --
+    # there is no stability model -- so the optimizer will leave it wherever it
+    # starts.  The bounds are what keeps it in the range a tailless aircraft is
+    # normally built in, and the reported quarter-chord sweep is the number to
+    # watch: with taper it sits well forward of the leading-edge value.
+    "le_sweep_deg": (0.0, 45.0),
 }
 
 
