@@ -12,7 +12,9 @@ the work in Adam is much cheaper for the same optimum.
 Run with ``uv run python -m airfoil.optimize``.
 """
 
+import json
 import time
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -20,6 +22,11 @@ import numpy as np
 from jaxopt import LBFGSB
 
 import airfoil.airfoil_model as am
+
+# Where the optimum is cached.  The solve takes several seconds, which is too
+# long to repeat every time something wants to draw or report the result, and
+# the answer only changes when the model or the bounds do.
+RESULT_PATH = Path(__file__).parent / "optimum.json"
 
 N_STARTS = 256
 ADAM_STEPS = 400
@@ -105,17 +112,40 @@ def _starts(lower, upper):
     return jnp.asarray(np.vstack([base, scatter]))
 
 
-def optimize():
+def optimize(save=True):
     """Best geometry found, with its constraint slacks."""
     lower, upper = _bounds_arrays()
     started = time.perf_counter()
     best_x, best_cost = _solve(_starts(lower, upper), lower, upper)
     best_x.block_until_ready()
-    return {
+    result = {
         "x": best_x,
         "cost": float(best_cost),
         "elapsed": time.perf_counter() - started,
     }
+    if save:
+        RESULT_PATH.write_text(json.dumps({
+            "design_vars": list(am.DESIGN_VARS),
+            "x": [float(v) for v in np.asarray(best_x)],
+            "cost": result["cost"],
+        }, indent=2) + "\n")
+    return result
+
+
+def load_optimum():
+    """The cached optimum, or None if the optimizer has not been run.
+
+    Returned as a plain array in DESIGN_VARS order.  The variable names are
+    stored alongside it and checked, so a stale cache from before a design
+    variable was added or reordered is rejected rather than silently
+    misinterpreted as a valid geometry.
+    """
+    if not RESULT_PATH.exists():
+        return None
+    data = json.loads(RESULT_PATH.read_text())
+    if data.get("design_vars") != list(am.DESIGN_VARS):
+        return None
+    return jnp.asarray(data["x"], dtype=jnp.float64)
 
 
 def _print_comparison(x):

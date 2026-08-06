@@ -15,14 +15,33 @@ Deliberately schematic.  The section is a crude thickness profile, not a real
 airfoil, because the airfoil shape has not been chosen yet -- what is being
 checked here is whether the things inside the wing fit.
 
-Run with ``uv run python -m airfoil.plots`` to write plots.html and open it.
+Every figure takes a design vector, defaulting to the optimizer's result when
+one has been cached and to the hand-picked baseline otherwise.
+
+    uv run python -m airfoil.plots              # optimum if available
+    uv run python -m airfoil.plots --baseline   # the hand-picked point
+    uv run python -m airfoil.plots --optimize   # re-run the optimizer first
 """
+
+import argparse
 
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 import airfoil.airfoil_model as am
+import airfoil.optimize as opt
+
+
+def default_design():
+    """The optimizer's result if it has been run, else the baseline.
+
+    Falling back rather than failing keeps the plots usable before the
+    optimizer has ever been run, which is also the case where someone is most
+    likely to be poking at the model by hand.
+    """
+    x = opt.load_optimum()
+    return am.BASELINE if x is None else x
 
 
 def _section_outline(chord, max_thickness, n=80):
@@ -38,7 +57,7 @@ def _section_outline(chord, max_thickness, n=80):
 
 def planform_figure(p=None):
     """Top view: chords, elevon, motors, and slipstream footprint."""
-    p = am.BASELINE if p is None else p
+    p = default_design() if p is None else p
     g = am.unpack(p)
     r = am.evaluate(p)
 
@@ -168,7 +187,7 @@ def planform_figure(p=None):
 
 def section_figure(p=None):
     """Root section with the battery and servo drawn to scale inside it."""
-    p = am.BASELINE if p is None else p
+    p = default_design() if p is None else p
     g = am.unpack(p)
     r = am.evaluate(p)
 
@@ -254,7 +273,7 @@ def fit_figure(p=None):
     the servo can actually sit at, which is the constraint that has shaped the
     whole centre section.
     """
-    p = am.BASELINE if p is None else p
+    p = default_design() if p is None else p
     g = am.unpack(p)
     # The servo's own section, not the root: it sits outboard, where the wing is
     # both shorter in chord and thinner, so the root would flatter it.
@@ -315,7 +334,7 @@ def authority_figure(p=None, deflection_deg=10.0):
     and the point of the plot is that the sizing case is whichever regime is
     lowest, not the one that is easiest to think about.
     """
-    p = am.BASELINE if p is None else p
+    p = default_design() if p is None else p
     r = am.evaluate(p, deflection_deg=deflection_deg)
     a = r["authority"]
     names = list(a.keys())
@@ -339,9 +358,9 @@ def authority_figure(p=None, deflection_deg=10.0):
     return fig
 
 
-def dashboard(p=None):
+def dashboard(p=None, label=None):
     """All four views in one figure."""
-    p = am.BASELINE if p is None else p
+    p = default_design() if p is None else p
     figs = [planform_figure(p), section_figure(p),
             fit_figure(p), authority_figure(p)]
 
@@ -365,15 +384,48 @@ def dashboard(p=None):
                           autorange="reversed", row=1, col=1)
     combined.update_yaxes(scaleanchor="x2", scaleratio=1, row=1, col=2)
     combined.update_yaxes(type="log", row=2, col=2)
+    r = am.evaluate(p)
+    title = "Tailsitter geometry"
+    if label:
+        title = f"{title}  --  {label}"
+    title += (f"  --  stall {float(r['v_stall']):.2f} m/s,"
+              f" {float(r['mass']) * 1e3:.1f} g, TWR {float(r['twr']):.2f}")
     combined.update_layout(
         height=1000, showlegend=True, barmode="group",
-        title_text="Tailsitter geometry",
+        title_text=title,
         margin={"l": 60, "r": 40, "t": 80, "b": 40},
     )
     return combined
 
 
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--baseline", action="store_true",
+                        help="plot the hand-picked baseline instead of the optimum")
+    parser.add_argument("--optimize", action="store_true",
+                        help="re-run the optimizer before plotting")
+    parser.add_argument("-o", "--out", default="airfoil/plots.html")
+    args = parser.parse_args()
+
+    if args.optimize:
+        print("Running optimizer...")
+        result = opt.optimize()
+        print(f"  converged in {result['elapsed']:.1f} s"
+              f"  (cost {result['cost']:.4f})")
+
+    if args.baseline:
+        p, label = am.BASELINE, "hand-picked baseline"
+    else:
+        x = opt.load_optimum()
+        if x is None:
+            p, label = am.BASELINE, "hand-picked baseline (no optimum cached)"
+            print("No cached optimum; run with --optimize to generate one.")
+        else:
+            p, label = x, "optimized"
+
+    dashboard(p, label=label).write_html(args.out, include_plotlyjs="cdn")
+    print(f"wrote {args.out}  ({label})")
+
+
 if __name__ == "__main__":
-    out = "airfoil/plots.html"
-    dashboard().write_html(out, include_plotlyjs="cdn")
-    print(f"wrote {out}")
+    main()
