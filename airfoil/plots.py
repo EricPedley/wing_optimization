@@ -74,6 +74,16 @@ def planform_figure(p=None):
     def chord_at(y):
         return root_c + (tip_c - root_c) * (abs(y) / semi)
 
+    # Hinge position, computed the same way the model does it, so the drawing
+    # cannot disagree with the numbers.  With a constant-chord elevon this runs
+    # parallel to the trailing edge; with a constant-fraction one it converges
+    # on it, which is the difference the plot is meant to make visible.
+    mac = float(r["mac"])
+
+    def hinge_at(y):
+        c = chord_at(y)
+        return c - float(am.elevon_chord_at(c, x_hinge, mac))
+
     fig = go.Figure()
 
     ys = np.linspace(-semi, semi, 200)
@@ -92,7 +102,7 @@ def planform_figure(p=None):
         ye = np.linspace(sign * ein, sign * eout, 40)
         fig.add_trace(go.Scatter(
             x=ye * 1e3,
-            y=np.array([chord_at(y) * x_hinge for y in ye]) * 1e3,
+            y=np.array([hinge_at(y) for y in ye]) * 1e3,
             mode="lines", line={"color": "red", "width": 2, "dash": "dash"},
             name="Hinge line" if sign == 1 else None,
             showlegend=sign == 1, hoverinfo="skip",
@@ -101,7 +111,7 @@ def planform_figure(p=None):
     # Elevon area, shaded so its span and chordwise extent are both obvious.
     for sign in (1, -1):
         ye = np.linspace(sign * ein, sign * eout, 40)
-        hinge = np.array([chord_at(y) * x_hinge for y in ye])
+        hinge = np.array([hinge_at(y) for y in ye])
         trail = np.array([chord_at(y) for y in ye])
         fig.add_trace(go.Scatter(
             x=np.concatenate([ye, ye[::-1]]) * 1e3,
@@ -209,7 +219,12 @@ def section_figure(p=None):
     chord = float(g["root_chord"])
     thick = float(g["root_thickness"])
     station = float(g["servo_station"])
-    x_hinge = float(g["x_hinge"])
+    mac = float(r["mac"])
+
+    # Hinge fraction at *this* section, which is not the design variable when
+    # the elevon is constant-chord: x_hinge then sets the elevon width at the
+    # mean aerodynamic chord, and the fraction varies along the span.
+    x_hinge = float(am.hinge_fraction_at(chord, float(g["x_hinge"]), mac))
 
     xs, half = _section_outline(chord, thick)
 
@@ -254,7 +269,8 @@ def section_figure(p=None):
 
     # Pushrod from the servo output to the hinge, straight-line schematic.
     fig.add_trace(go.Scatter(
-        x=np.array([sv_x1, x_hinge * servo_chord]) * 1e3,
+        x=np.array([sv_x1, servo_chord - float(am.elevon_chord_at(
+            servo_chord, float(g["x_hinge"]), mac))]) * 1e3,
         y=np.array([0.0, 0.0]) * 1e3,
         mode="lines", line={"color": "purple", "width": 1, "dash": "dot"},
         name="Pushrod", hoverinfo="skip",
@@ -325,8 +341,11 @@ def fit_figure(p=None):
         mode="markers", marker={"color": "purple", "size": 12},
         name="Chosen station",
     ))
+    # Hinge fraction at the servo's own section, which is where this plot lives.
+    xh_local = float(am.hinge_fraction_at(
+        float(g["servo_chord"]), float(g["x_hinge"]), float(am.evaluate(p)["mac"])))
     fig.add_trace(go.Scatter(
-        x=[float(g["x_hinge"]) * 100, float(g["x_hinge"]) * 100],
+        x=[xh_local * 100, xh_local * 100],
         y=[0.0, thick * 1e3], mode="lines",
         line={"color": "red", "width": 2, "dash": "dash"}, name="Hinge",
     ))

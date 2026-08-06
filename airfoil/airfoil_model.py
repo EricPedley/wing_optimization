@@ -88,6 +88,24 @@ SERVO_WIDTH = 0.015          # m, spanwise
 MAX_MOTOR_Y = 0.055          # m from the centreline
 MAX_SERVO_Y = 0.060          # m from the centreline
 
+# Elevon planform.  With a constant hinge *fraction* the hinge line converges on
+# the trailing edge as the chord tapers, so the elevon shrinks outboard -- on
+# this wing from 18 mm at the root to 9 mm at the tip, which is impractically
+# small to hinge and horn, and puts the least surface where the roll moment arm
+# is longest.  A constant elevon *chord* instead keeps the hinge line parallel
+# to the trailing edge, which is what flying wings are normally built with and
+# what is far easier to print and hinge.
+#
+# The cost is that the hinge fraction then varies along the span (0.14 at the
+# root to 0.28 at the tip here), so the section flap derivatives vary too.  They
+# are evaluated at the mean aerodynamic chord, which is the standard
+# approximation and good to a few percent over this range.
+CONSTANT_CHORD_ELEVON = True
+
+# Minimum elevon chord that can actually be built: below this there is no room
+# for a hinge, a horn, and a pushrod attachment.
+MIN_ELEVON_CHORD = 0.012     # m
+
 # Section thickness profile.  A typical section reaches maximum thickness near
 # 30% chord and thins toward the trailing edge roughly as a quadratic.  This is
 # what makes servo *chordwise position* matter: the same servo needs far less
@@ -457,6 +475,29 @@ def local_geometry(root_chord, tip_chord, root_thickness, tip_thickness,
     return chord, thickness
 
 
+def elevon_chord_at(chord, x_hinge, mac):
+    """Elevon chord at a station whose local chord is ``chord``, in m.
+
+    With a constant-chord elevon the hinge line runs parallel to the trailing
+    edge, so every station gets the same elevon chord: the one that ``x_hinge``
+    implies at the mean aerodynamic chord.  Otherwise the elevon is a fixed
+    fraction of the local chord and tapers with it.
+    """
+    if CONSTANT_CHORD_ELEVON:
+        return jnp.broadcast_to((1.0 - x_hinge) * mac, jnp.shape(chord))
+    return (1.0 - x_hinge) * chord
+
+
+def hinge_fraction_at(chord, x_hinge, mac):
+    """Hinge station as a fraction of the local chord.
+
+    Constant for a tapering elevon, but varying for a constant-chord one, which
+    is why the section flap derivatives are evaluated at the mean aerodynamic
+    chord rather than pretending one fraction holds everywhere.
+    """
+    return 1.0 - elevon_chord_at(chord, x_hinge, mac) / jnp.maximum(chord, 1e-9)
+
+
 def servo_slack(chord, thickness, servo_station, x_hinge):
     """Room around the servo at its chordwise station, in m.
 
@@ -510,7 +551,11 @@ def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
 
     chord, thickness = local_geometry(root_chord, tip_chord, root_thickness,
                                       tip_thickness, servo_span_fraction)
-    servo = servo_slack(chord, thickness, servo_station, x_hinge)
+    # The servo has to clear the hinge in *its own* section, where the hinge
+    # fraction is not x_hinge once the elevon is constant-chord.
+    _, mac = planform(root_chord, tip_chord)
+    x_hinge_local = hinge_fraction_at(chord, x_hinge, mac)
+    servo = servo_slack(chord, thickness, servo_station, x_hinge_local)
 
     # The servo must sit outboard of the battery, which occupies the centre
     # section out to roughly half its own width either side of the centreline.
@@ -701,6 +746,17 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "wash_fraction": washed_span_fraction(
             g["motor_y"], g["elevon_inboard_y"], g["elevon_outboard_y"]),
         "flap_effectiveness": flap_effectiveness_ratio(g["x_hinge"]),
+        # Elevon chord at the inboard and outboard ends of the surface, which is
+        # what decides whether it can be hinged and horned at all.  Equal when
+        # the elevon is constant-chord; the outboard one is the small one when
+        # it is not.
+        "elevon_chord_inboard": elevon_chord_at(
+            local_geometry(g["root_chord"], g["tip_chord"],
+                           g["root_thickness"], g["tip_thickness"],
+                           g["elevon_inboard_y"] / (0.5 * SPAN))[0],
+            g["x_hinge"], mac),
+        "elevon_chord_outboard": elevon_chord_at(
+            g["tip_chord"], g["x_hinge"], mac),
         "i_roll": i_roll,
         "i_pitch": i_pitch,
         "i_yaw": i_yaw,
@@ -829,6 +885,12 @@ def constraints(p, cl_max=0.8, deflection_deg=10.0):
             g["servo_y"] - 0.5 * SERVO_WIDTH, g["elevon_inboard_y"]),
         "servo_outboard_of_elevon": _excess(
             g["servo_y"] + 0.5 * SERVO_WIDTH, g["elevon_outboard_y"]),
+        # The narrow end of the elevon still has to fit a hinge, a horn, and a
+        # pushrod attachment.  Binding mainly when the elevon tapers, since a
+        # constant-chord one is the same width everywhere.
+        "elevon_chord": _shortfall(
+            jnp.minimum(r["elevon_chord_inboard"], r["elevon_chord_outboard"]),
+            MIN_ELEVON_CHORD),
     }
 
 
