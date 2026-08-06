@@ -60,6 +60,12 @@ PROP_DIAMETER = 0.051        # m, 2 inch
 BATTERY_LENGTH = 0.065       # m, drives the minimum root chord
 MIN_ROOT_THICKNESS = 0.015   # m, drives the minimum root thickness
 
+# Chord fraction where the battery's forward face sits.  Kept well forward
+# both because that is where the section is deepest and because the battery is
+# the densest single item, so its position dominates the centre of gravity --
+# and a tailsitter flying wing needs its CG forward to be stable in cruise.
+BATTERY_STATION = 0.10
+
 # The servo is a box, and which of its dimensions binds depends on how it is
 # mounted, so all three are named separately rather than collapsed into one
 # "servo thickness".  Dimensions below are from CAD.  SERVO_LENGTH runs along
@@ -71,7 +77,7 @@ MIN_ROOT_THICKNESS = 0.015   # m, drives the minimum root thickness
 # variable: it only fits near maximum thickness, and it may not fit at all
 # without either a deeper root or mounting it on its side.
 SERVO_LENGTH = 0.021         # m, longest dimension, lies along the chord
-SERVO_DEPTH = 0.015          # m, the dimension that fights section thickness
+SERVO_DEPTH = 0.008          # m, the dimension that fights section thickness
 SERVO_WIDTH = 0.015          # m, spanwise
 
 # Section thickness profile.  A typical section reaches maximum thickness near
@@ -412,13 +418,27 @@ def thickness_at(x, max_thickness):
     return max_thickness * jnp.clip(shape, 0.0, 1.0)
 
 
-def servo_slack(root_chord, root_thickness, servo_station, x_hinge):
+def local_geometry(root_chord, tip_chord, root_thickness, tip_thickness,
+                   span_fraction):
+    """Chord and maximum thickness at a fraction of the semi-span.
+
+    Straight-tapered wing with both chord and thickness lofted linearly between
+    the root and tip sections.
+    """
+    chord = root_chord + (tip_chord - root_chord) * span_fraction
+    thickness = root_thickness + (tip_thickness - root_thickness) * span_fraction
+    return chord, thickness
+
+
+def servo_slack(chord, thickness, servo_station, x_hinge):
     """Room around the servo at its chordwise station, in m.
 
-    ``servo_station`` is the chord fraction where the servo body is centred.
-    Positive return means it fits.  Two things are checked: the section is deep
-    enough for the servo where it actually sits, and the servo body plus its
-    pushrod run fit between that station and the hinge.
+    ``servo_station`` is the chord fraction where the servo body is centred, and
+    ``chord``/``thickness`` are the section it sits in -- which is its own
+    spanwise station, not the root.  Positive return means it fits.
+
+    Two things are checked: the section is deep enough for the servo where it
+    actually sits, and the servo body fits between that station and the hinge.
 
     Moving the servo forward relaxes the depth constraint quickly, because
     section thickness aft of maximum falls off quadratically.  It does not come
@@ -427,39 +447,50 @@ def servo_slack(root_chord, root_thickness, servo_station, x_hinge):
     cost belongs to the linkage model, not here.  What this function reports is
     the packaging half of the trade.
     """
-    depth_available = thickness_at(servo_station, root_thickness)
-    depth_slack = depth_available - SERVO_DEPTH
+    depth_slack = thickness_at(servo_station, thickness) - SERVO_DEPTH
 
     # The servo body occupies chord centred on its station; the hinge must be
     # far enough aft that the body does not run into it.
-    body_aft_edge = (servo_station + 0.5 * SERVO_LENGTH / root_chord)
-    clearance_slack = (x_hinge - body_aft_edge) * root_chord
+    body_aft_edge = servo_station + 0.5 * SERVO_LENGTH / chord
+    clearance_slack = (x_hinge - body_aft_edge) * chord
 
     return jnp.minimum(depth_slack, clearance_slack)
 
 
-def pushrod_length(root_chord, servo_station, x_hinge):
+def pushrod_length(chord, servo_station, x_hinge):
     """Chordwise distance from the servo output to the hinge line, in m.
 
     The quantity the linkage model needs: a longer run means the horn is driven
     further off-axis, so mechanical advantage varies more across the stroke.
     """
-    return (x_hinge - servo_station) * root_chord
+    return (x_hinge - servo_station) * chord
 
 
-def volume_slack(root_chord, root_thickness, servo_station=0.45, x_hinge=0.75):
-    """How much room the root section has beyond what it must hold, in m.
+def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
+                 servo_station, servo_span_fraction, x_hinge):
+    """How much room the wing has beyond what it must hold, in m.
 
-    Positive means the battery and servos fit.  The battery sets a floor on both
-    root chord and root thickness; the servo is checked at its own chordwise
-    station rather than at the hinge line, since where it sits is a design
-    choice with real consequences for how thick the centre section must be.
+    Positive means everything fits.  The battery and the servos are checked at
+    different spanwise stations because that is where they actually live: the
+    battery occupies the centreline, and the servos sit outboard near the
+    elevons they drive.  Checking both at the root would have them fighting for
+    the same chord, which is a constraint that does not exist -- and one the
+    model previously invented, making the design look infeasible when it was
+    only badly drawn.
     """
     chord_slack = root_chord - BATTERY_LENGTH
     thickness_slack = root_thickness - MIN_ROOT_THICKNESS
-    servo = servo_slack(root_chord, root_thickness, servo_station, x_hinge)
 
-    return jnp.minimum(jnp.minimum(chord_slack, thickness_slack), servo)
+    chord, thickness = local_geometry(root_chord, tip_chord, root_thickness,
+                                      tip_thickness, servo_span_fraction)
+    servo = servo_slack(chord, thickness, servo_station, x_hinge)
+
+    # The servo must sit outboard of the battery, which occupies the centre
+    # section out to roughly half its own width either side of the centreline.
+    span_slack = servo_span_fraction * 0.5 * SPAN - 0.5 * SERVO_WIDTH
+
+    return jnp.minimum(jnp.minimum(chord_slack, thickness_slack),
+                       jnp.minimum(servo, span_slack))
 
 
 # --- Flight conditions --------------------------------------------------------
@@ -486,14 +517,17 @@ def cruise_lift_coefficient(mass_kg, area, v_inf):
 
 
 DESIGN_VARS = ["root_chord", "tip_chord", "root_thickness", "tip_thickness",
-               "x_hinge", "elevon_inboard_frac", "motor_frac", "servo_station"]
+               "x_hinge", "elevon_inboard_frac", "motor_frac", "servo_station",
+               "servo_span_frac"]
 
 
 def unpack(p):
     """Design vector to named geometry, with span fractions turned into metres."""
     (root_chord, tip_chord, root_t, tip_t, x_hinge, elevon_in_f, motor_f,
-     servo_station) = p
+     servo_station, servo_span_f) = p
     semi = 0.5 * SPAN
+    servo_chord, servo_thickness = local_geometry(
+        root_chord, tip_chord, root_t, tip_t, servo_span_f)
     return {
         "root_chord": root_chord,
         "tip_chord": tip_chord,
@@ -504,6 +538,10 @@ def unpack(p):
         "elevon_outboard_y": semi,
         "motor_y": motor_f * semi,
         "servo_station": servo_station,
+        "servo_span_frac": servo_span_f,
+        "servo_y": servo_span_f * semi,
+        "servo_chord": servo_chord,
+        "servo_thickness": servo_thickness,
     }
 
 
@@ -563,12 +601,13 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "root_tc": g["root_thickness"] / jnp.maximum(g["root_chord"], 1e-9),
         "tip_tc": g["tip_thickness"] / jnp.maximum(g["tip_chord"], 1e-9),
         "volume_slack": volume_slack(
-            g["root_chord"], g["root_thickness"],
-            g["servo_station"], g["x_hinge"]),
+            g["root_chord"], g["tip_chord"],
+            g["root_thickness"], g["tip_thickness"],
+            g["servo_station"], g["servo_span_frac"], g["x_hinge"]),
         "servo_depth_available": thickness_at(
-            g["servo_station"], g["root_thickness"]),
+            g["servo_station"], g["servo_thickness"]),
         "pushrod_length": pushrod_length(
-            g["root_chord"], g["servo_station"], g["x_hinge"]),
+            g["servo_chord"], g["servo_station"], g["x_hinge"]),
         "yaw_moment": yaw_moment(0.5 * thrust_hover, g["motor_y"]),
         "wash_fraction": washed_span_fraction(
             g["motor_y"], g["elevon_inboard_y"], g["elevon_outboard_y"]),
@@ -593,6 +632,7 @@ BASELINE = jnp.array([
     0.30,    # elevon_inboard_frac
     0.47,    # motor_frac
     0.45,    # servo_station, chord fraction where the servo body sits
+    0.40,    # servo_span_frac, outboard of the battery, near its elevon
 ])
 
 
@@ -637,20 +677,25 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
     # which is what tells you what to go fix.
     rc = float(g["root_chord"])
     rt = float(g["root_thickness"])
+    sc = float(g["servo_chord"])
     terms = {
         "battery chord": rc - BATTERY_LENGTH,
         "min thickness": rt - MIN_ROOT_THICKNESS,
         "servo depth": float(r["servo_depth_available"]) - SERVO_DEPTH,
         "servo/hinge clearance": (
             float(g["x_hinge"]) - float(g["servo_station"])
-            - 0.5 * SERVO_LENGTH / rc) * rc,
+            - 0.5 * SERVO_LENGTH / sc) * sc,
+        "servo outboard of battery": (
+            float(g["servo_y"]) - 0.5 * SERVO_WIDTH),
     }
     binding = min(terms, key=terms.get)
     for name, value in terms.items():
         mark = "  <-- binding" if name == binding else ""
-        print(f"    {name:<22}{value * 1e3:+7.1f} mm{mark}")
+        print(f"    {name:<26}{value * 1e3:+7.1f} mm{mark}")
     print(f"    servo at {float(g['servo_station']) * 100:.0f}% chord,"
-          f" pushrod run {float(r['pushrod_length']) * 1e3:.1f} mm to the hinge")
+          f" {float(g['servo_span_frac']) * 100:.0f}% semi-span"
+          f" ({sc * 1e3:.0f} mm local chord),"
+          f" pushrod {float(r['pushrod_length']) * 1e3:.1f} mm")
 
     print("\n=== Elevon and motors ===")
     print(f"  hinge at        {float(g['x_hinge']) * 100:8.0f} % chord"
