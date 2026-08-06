@@ -46,9 +46,13 @@ BOUNDS = {
     "tip_thickness": (0.003, 0.020),
     "x_hinge": (0.60, 0.90),
     "elevon_inboard_frac": (0.10, 0.70),
-    "motor_frac": (0.20, 0.80),
+    # Motor and servo spanwise positions are capped by how far the existing
+    # wiring reaches.  Expressed as span fractions here because that is what the
+    # design vector holds; the constraints check the same limits in metres, so a
+    # violation is caught even if these bounds are widened.
+    "motor_frac": (0.20, am.MAX_MOTOR_Y / (0.5 * am.SPAN)),
     "servo_station": (0.20, 0.70),
-    "servo_span_frac": (0.15, 0.85),
+    "servo_span_frac": (0.15, am.MAX_SERVO_Y / (0.5 * am.SPAN)),
 }
 
 

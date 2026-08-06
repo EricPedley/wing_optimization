@@ -80,6 +80,14 @@ SERVO_LENGTH = 0.021         # m, longest dimension, lies along the chord
 SERVO_DEPTH = 0.008          # m, the dimension that fights section thickness
 SERVO_WIDTH = 0.015          # m, spanwise
 
+# Wiring reach.  Both are hard limits set by the harness that already exists,
+# not by aerodynamics, and both bind against things the optimizer wants: it
+# pushes the motors outboard for yaw authority and the servos outboard to sit
+# in thinner, shorter-chord section.  Lengthening either harness would buy real
+# performance, so these are worth revisiting rather than treating as fixed.
+MAX_MOTOR_Y = 0.055          # m from the centreline
+MAX_SERVO_Y = 0.060          # m from the centreline
+
 # Section thickness profile.  A typical section reaches maximum thickness near
 # 30% chord and thins toward the trailing edge roughly as a quadratic.  This is
 # what makes servo *chordwise position* matter: the same servo needs far less
@@ -783,8 +791,14 @@ def _shortfall(value, floor):
     return jnp.maximum(0.0, floor - value) / jnp.maximum(jnp.abs(floor), 1e-9)
 
 
+def _excess(value, ceiling):
+    """Fractional overshoot above a ceiling, zero when satisfied."""
+    return jnp.maximum(0.0, value - ceiling) / jnp.maximum(jnp.abs(ceiling), 1e-9)
+
+
 def constraints(p, cl_max=0.8, deflection_deg=10.0):
     """Each constraint's fractional shortfall.  All zero means feasible."""
+    g = unpack(p)
     r = evaluate(p, cl_max=cl_max, deflection_deg=deflection_deg)
     hover = r["authority"]["hover"]
     cruise = r["authority"]["cruise"]
@@ -803,6 +817,18 @@ def constraints(p, cl_max=0.8, deflection_deg=10.0):
         # floor of zero with a millimetre-scale normalization keeps it on the
         # same footing as the others.
         "packaging": jnp.maximum(0.0, -r["volume_slack"]) / 0.001,
+        # Harness reach.  Both push against what the optimizer wants, so
+        # without them it happily places hardware the wiring cannot reach.
+        "motor_reach": _excess(g["motor_y"], MAX_MOTOR_Y),
+        "servo_reach": _excess(g["servo_y"], MAX_SERVO_Y),
+        # The servo must sit within the span of the elevon it drives, or the
+        # pushrod would have to run diagonally across the wing to reach a horn
+        # it does not line up with.  Both edges of the servo body are checked,
+        # not just its centre, so the whole box lands inside the elevon.
+        "servo_inboard_of_elevon": _shortfall(
+            g["servo_y"] - 0.5 * SERVO_WIDTH, g["elevon_inboard_y"]),
+        "servo_outboard_of_elevon": _excess(
+            g["servo_y"] + 0.5 * SERVO_WIDTH, g["elevon_outboard_y"]),
     }
 
 
@@ -893,6 +919,14 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
             - 0.5 * SERVO_LENGTH / sc) * sc,
         "servo outboard of battery": (
             float(g["servo_y"]) - 0.5 * SERVO_WIDTH),
+        "motor wiring reach": MAX_MOTOR_Y - float(g["motor_y"]),
+        "servo wiring reach": MAX_SERVO_Y - float(g["servo_y"]),
+        "servo inside elevon (in)": (
+            float(g["servo_y"]) - 0.5 * SERVO_WIDTH
+            - float(g["elevon_inboard_y"])),
+        "servo inside elevon (out)": (
+            float(g["elevon_outboard_y"])
+            - float(g["servo_y"]) - 0.5 * SERVO_WIDTH),
     }
     binding = min(terms, key=terms.get)
     for name, value in terms.items():

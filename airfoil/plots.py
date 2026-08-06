@@ -160,6 +160,21 @@ def planform_figure(p=None):
             showlegend=sign == 1, hoverinfo="skip",
         ))
 
+    # Wiring reach limits.  Drawn because they are the constraints most likely
+    # to be forgotten when reading a planform: nothing about the shape shows
+    # that the harness cannot reach further out.
+    for limit, colour, label in ((am.MAX_MOTOR_Y, "blue", "Motor reach"),
+                                 (am.MAX_SERVO_Y, "purple", "Servo reach")):
+        for sign in (1, -1):
+            fig.add_trace(go.Scatter(
+                x=np.array([sign * limit, sign * limit]) * 1e3,
+                y=np.array([0.0, root_c]) * 1e3,
+                mode="lines",
+                line={"color": colour, "width": 1, "dash": "longdash"},
+                name=label if sign == 1 else None,
+                showlegend=sign == 1, hoverinfo="skip",
+            ))
+
     # Props, drawn at the leading edge where they actually mount.
     theta = np.linspace(0, 2 * np.pi, 60)
     for sign in (1, -1):
