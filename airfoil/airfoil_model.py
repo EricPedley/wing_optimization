@@ -327,6 +327,25 @@ def yaw_moment(differential_thrust_n, motor_y):
     return differential_thrust_n * motor_y
 
 
+def available_differential_thrust(throttle_fraction):
+    """Differential thrust available at a given throttle setting, in N.
+
+    Yaw authority is *not* worst in hover, which is the natural assumption.  In
+    hover the motors sit near half throttle with room to push one up and pull
+    the other down, and the aircraft is fighting only its own inertia.  In
+    forward flight at cruise throttle there is less headroom above the current
+    setting, and yaw additionally fights the wing's weathercock stability.  So
+    the binding yaw case is forward flight, and it has to be checked there.
+
+    The differential is limited by whichever headroom is smaller: how far the
+    up-motor can rise toward full, or how far the down-motor can fall toward
+    zero.  Symmetric about half throttle, hence the min.
+    """
+    t = jnp.clip(throttle_fraction, 0.0, 1.0)
+    headroom = jnp.minimum(1.0 - t, t)
+    return 2.0 * headroom * THRUST_PER_MOTOR * G
+
+
 def hinge_moment(deflection_deg, x_hinge, thrust_n, v_inf, motor_y,
                  elevon_inboard_y, elevon_outboard_y, chord, alpha_deg=0.0):
     """Aerodynamic torque about the hinge line, in N.m.
@@ -513,6 +532,49 @@ def cruise_lift_coefficient(mass_kg, area, v_inf):
     return 2.0 * weight / (RHO * jnp.maximum(v_inf ** 2, 1e-9) * area)
 
 
+# --- Inertia and angular acceleration -----------------------------------------
+#
+# A control moment in N.m says nothing on its own about whether the aircraft
+# responds usefully; what matters is the angular acceleration it produces, which
+# is the moment divided by the relevant inertia.  Expressing authority that way
+# also makes the three axes comparable, which they are not in raw moment terms.
+
+
+def inertia(root_chord, tip_chord, root_thickness, tip_thickness):
+    """Roll, pitch, and yaw moments of inertia about the CG, in kg.m^2.
+
+    The wing skin is treated as a lamina with mass spread over the planform, and
+    the fixed mass as a point at the centre.  Both are crude, but the ratios
+    between axes -- which is what sets the relative difficulty of each -- come
+    out about right for a flying wing, and roll inertia in particular is
+    dominated by the span term, which is modelled honestly.
+
+    Roll uses the span, pitch the chord, and yaw both, which is why a long-span
+    low-chord wing is sluggish in roll and quick in pitch.
+    """
+    w_mass = wing_mass(root_chord, tip_chord, root_thickness, tip_thickness)
+    _, mac = planform(root_chord, tip_chord)
+
+    # Lamina about its own centroid: b^2/12 for roll, c^2/12 for pitch.  The
+    # taper concentrates mass inboard, which the uniform assumption overstates
+    # slightly; at this taper the error is a few percent.
+    i_roll = w_mass * SPAN ** 2 / 12.0
+    i_pitch = w_mass * mac ** 2 / 12.0
+
+    # The fixed mass sits near the centreline, so it adds little to roll but
+    # does add to pitch, spread over roughly the battery length.
+    i_pitch = i_pitch + FIXED_MASS * (BATTERY_LENGTH ** 2) / 12.0
+
+    # Perpendicular axis theorem for a lamina: yaw is the sum of the other two.
+    i_yaw = i_roll + i_pitch
+    return i_roll, i_pitch, i_yaw
+
+
+def angular_acceleration(moment, inertia_value):
+    """Angular acceleration in rad/s^2, the meaningful measure of authority."""
+    return moment / jnp.maximum(inertia_value, 1e-12)
+
+
 # --- Design point evaluation --------------------------------------------------
 
 
@@ -571,21 +633,40 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "idle_descent": (v_cruise, 0.05 * thrust_hover),
     }
 
+    i_roll, i_pitch, i_yaw = inertia(
+        g["root_chord"], g["tip_chord"],
+        g["root_thickness"], g["tip_thickness"])
+
+    # Throttle needed in each regime, which is what limits differential thrust
+    # and so yaw authority.  Hover sits near the thrust required to hold the
+    # aircraft up; cruise needs far less.
+    throttles = {"hover": 1.0 / jnp.maximum(thrust_to_weight(mass), 1e-9),
+                 "transition": 0.8, "cruise": 0.3, "idle_descent": 0.05}
+
     authority = {}
     for name, (v, thrust) in conditions.items():
+        m_pitch = pitch_moment(
+            deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
+            g["elevon_inboard_y"], g["elevon_outboard_y"], area, mac)
+        m_roll = roll_moment(
+            deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
+            g["elevon_inboard_y"], g["elevon_outboard_y"], mac)
+        m_yaw = yaw_moment(
+            available_differential_thrust(throttles[name]), g["motor_y"])
         authority[name] = {
             "q": elevon_dynamic_pressure(
                 thrust, v, g["motor_y"],
                 g["elevon_inboard_y"], g["elevon_outboard_y"]),
-            "pitch": pitch_moment(
-                deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
-                g["elevon_inboard_y"], g["elevon_outboard_y"], area, mac),
-            "roll": roll_moment(
-                deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
-                g["elevon_inboard_y"], g["elevon_outboard_y"], mac),
+            "pitch": m_pitch,
+            "roll": m_roll,
+            "yaw": m_yaw,
             "hinge": hinge_moment(
                 deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
                 g["elevon_inboard_y"], g["elevon_outboard_y"], mac),
+            # Angular accelerations, which is what "enough authority" means.
+            "alpha_pitch": angular_acceleration(m_pitch, i_pitch),
+            "alpha_roll": angular_acceleration(m_roll, i_roll),
+            "alpha_yaw": angular_acceleration(m_yaw, i_yaw),
         }
 
     return {
@@ -612,11 +693,136 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "wash_fraction": washed_span_fraction(
             g["motor_y"], g["elevon_inboard_y"], g["elevon_outboard_y"]),
         "flap_effectiveness": flap_effectiveness_ratio(g["x_hinge"]),
+        "i_roll": i_roll,
+        "i_pitch": i_pitch,
+        "i_yaw": i_yaw,
         "authority": authority,
     }
 
 
 evaluate_jit = jax.jit(evaluate, static_argnames=())
+
+
+# --- Objective ----------------------------------------------------------------
+#
+# Minimize stall speed subject to floors on hover control authority and on
+# thrust-to-weight, with the packaging constraints enforced throughout.
+#
+# Stall speed is the right thing to minimize because it is what makes the
+# aircraft launchable, landable, and forgiving in transition, and because it is
+# a single honest scalar rather than a weighted blend of incommensurable terms.
+# Everything else enters as a constraint, which is where the real design
+# knowledge lives: a constraint says "this must be true", which is a statement
+# you can defend, whereas a weight says "this is worth 0.3 of that", which
+# usually is not.
+#
+# The authority floors are set in hover for pitch and roll, because with no
+# freestream those axes have only prop wash to work with.  Yaw is floored in
+# cruise instead: differential thrust is limited by throttle headroom, and at
+# cruise throttle there is less of it than in hover, so hover is not the binding
+# case for yaw the way it is for the other two axes.
+
+# Minimum angular accelerations, rad/s^2.  These decide the whole design, so
+# they are derived rather than guessed: each is the acceleration that swings the
+# aircraft 30 degrees in a stated time, from theta = a t^2 / 2, which is the
+# form a pilot or a rate controller actually cares about.
+#
+#     30 deg in 150 ms  ->  47 rad/s^2      crisp, quad-like
+#     30 deg in 250 ms  ->  17 rad/s^2      adequate for attitude hold
+#     30 deg in 400 ms  ->   6.5 rad/s^2    sluggish but flyable
+#
+# Pitch and roll are floored for crisp response in hover, where a tailsitter is
+# balancing and has to reject gusts. Yaw gets the sluggish floor: it is the weak
+# axis on a twin without a rudder, it matters least for stability, and holding
+# it to the same standard would drive the motors outboard for no real gain.
+#
+# Worth knowing that at the current geometry every one of these is satisfied
+# with an order of magnitude to spare, because a 42 g aircraft has very little
+# inertia.  They are floors that keep a shrinking design honest, not targets.
+MIN_ALPHA_PITCH_HOVER = 47.0
+MIN_ALPHA_ROLL_HOVER = 47.0
+MIN_ALPHA_YAW_CRUISE = 6.5
+MIN_TWR = 1.3
+
+# Reynolds number below which the section data underpinning this model stops
+# meaning much.  Not a hard physical limit, but a statement that the model
+# should not be trusted to rank designs past it.
+MIN_RE_TIP = 25000.0
+
+# Chord is capped by the printer bed the same way span is.  Without this the
+# optimizer drives the chord up without limit, because in this model area is
+# almost free: it lowers stall speed and the only thing pushing back is skin
+# mass.  That is a real gap -- a very low aspect ratio wing has poor lift curve
+# slope, high induced drag, and in a tailsitter presents a large sail area to
+# gusts in hover -- but the printer bound is the honest constraint to state
+# here, rather than inventing an aerodynamic penalty the model cannot compute.
+MAX_CHORD = 0.256
+
+# Aspect ratio floor.  Below roughly 2.5 the lifting-line and thin-airfoil
+# assumptions behind every lift number in this model break down: a low aspect
+# ratio wing carries much of its lift through nonlinear vortex effects that
+# nothing here represents, and Cl_max in particular would be badly overstated.
+# So this is a validity bound on the model, not a claim about what flies well.
+MIN_ASPECT_RATIO = 2.5
+
+# Large enough that a violated constraint always costs more than the stall speed
+# it could buy.  Stall speed is order 5 m/s and a 1% shortfall squares to 1e-4,
+# so the weight has to be big for the penalty to bite at all near the boundary;
+# at 5000 a 1% violation costs 0.5 m/s of equivalent stall speed, which is more
+# than the optimizer can usually gain by cheating.
+CONSTRAINT_WEIGHT = 5000.0
+
+
+def _shortfall(value, floor):
+    """Fractional shortfall below a floor, zero when satisfied.
+
+    Normalized by the floor so constraints in different units contribute
+    comparably, and squared by the caller so the penalty is smooth at the
+    boundary rather than kinked.
+    """
+    return jnp.maximum(0.0, floor - value) / jnp.maximum(jnp.abs(floor), 1e-9)
+
+
+def constraints(p, cl_max=0.8, deflection_deg=10.0):
+    """Each constraint's fractional shortfall.  All zero means feasible."""
+    r = evaluate(p, cl_max=cl_max, deflection_deg=deflection_deg)
+    hover = r["authority"]["hover"]
+    cruise = r["authority"]["cruise"]
+
+    return {
+        "alpha_pitch_hover": _shortfall(
+            jnp.abs(hover["alpha_pitch"]), MIN_ALPHA_PITCH_HOVER),
+        "alpha_roll_hover": _shortfall(
+            jnp.abs(hover["alpha_roll"]), MIN_ALPHA_ROLL_HOVER),
+        "alpha_yaw_cruise": _shortfall(
+            jnp.abs(cruise["alpha_yaw"]), MIN_ALPHA_YAW_CRUISE),
+        "twr": _shortfall(r["twr"], MIN_TWR),
+        "re_tip": _shortfall(r["re_tip"], MIN_RE_TIP),
+        "aspect_ratio": _shortfall(r["aspect_ratio"], MIN_ASPECT_RATIO),
+        # Packaging: volume_slack is already a signed distance in metres, so a
+        # floor of zero with a millimetre-scale normalization keeps it on the
+        # same footing as the others.
+        "packaging": jnp.maximum(0.0, -r["volume_slack"]) / 0.001,
+    }
+
+
+def cost(p, cl_max=0.8, deflection_deg=10.0):
+    """Stall speed plus penalties for violated constraints.
+
+    A penalty method rather than a projection: the constraints couple through
+    the geometry (thickness feeds mass feeds stall speed feeds Reynolds number),
+    so there is no cheap feasible set to project onto, and squared shortfalls
+    keep the whole thing differentiable for the same reason the linkage model
+    smooths its dead-point penalty.
+    """
+    r = evaluate(p, cl_max=cl_max, deflection_deg=deflection_deg)
+    violations = constraints(p, cl_max=cl_max, deflection_deg=deflection_deg)
+    penalty = sum(v ** 2 for v in violations.values())
+    return r["v_stall"] + CONSTRAINT_WEIGHT * penalty
+
+
+cost_jit = jax.jit(cost)
+constraints_jit = jax.jit(constraints)
 
 
 # Current best guess at the configuration, in DESIGN_VARS order.  Root chord is
