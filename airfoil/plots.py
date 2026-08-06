@@ -158,15 +158,13 @@ def planform_figure(p=None):
     # Battery on the centreline and servos outboard, which is the layout that
     # lets both fit: they occupy different spanwise stations rather than
     # competing for the same chord.
+    batt_x0 = le_at(0.0) + float(g["battery_station"]) * root_c
+    batt_x1 = batt_x0 + am.BATTERY_LENGTH
     fig.add_trace(go.Scatter(
         x=np.array([-0.5 * am.SERVO_WIDTH, 0.5 * am.SERVO_WIDTH,
                     0.5 * am.SERVO_WIDTH, -0.5 * am.SERVO_WIDTH,
                     -0.5 * am.SERVO_WIDTH]) * 1e3,
-        y=np.array([am.BATTERY_STATION * root_c,
-                    am.BATTERY_STATION * root_c,
-                    am.BATTERY_STATION * root_c + am.BATTERY_LENGTH,
-                    am.BATTERY_STATION * root_c + am.BATTERY_LENGTH,
-                    am.BATTERY_STATION * root_c]) * 1e3,
+        y=np.array([batt_x0, batt_x0, batt_x1, batt_x1, batt_x0]) * 1e3,
         mode="lines", line={"color": "green", "width": 2},
         fill="toself", fillcolor="rgba(80,180,80,0.35)",
         name="Battery", hoverinfo="skip",
@@ -258,11 +256,13 @@ def section_figure(p=None):
         name="Section", hoverinfo="skip",
     ))
 
-    # Battery: sits forward, where the section is deepest, which is also where
-    # it needs to be for the centre of gravity.
-    batt_x0 = am.BATTERY_STATION * chord
+    # Battery, drawn at its own depth rather than the section's, so the gap
+    # between the box and the surface shows how much room is actually spare.
+    # Its forward face is the tight end: that is where the nose runs out of
+    # depth, and pushing it further forward is what forces a thicker root.
+    batt_x0 = float(g["battery_station"]) * chord
     batt_x1 = batt_x0 + am.BATTERY_LENGTH
-    batt_h = 0.5 * am.MIN_ROOT_THICKNESS
+    batt_h = 0.5 * am.BATTERY_THICKNESS
     fig.add_trace(go.Scatter(
         x=np.array([batt_x0, batt_x1, batt_x1, batt_x0, batt_x0]) * 1e3,
         y=np.array([-batt_h, -batt_h, batt_h, batt_h, -batt_h]) * 1e3,

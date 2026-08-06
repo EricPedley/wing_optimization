@@ -59,6 +59,11 @@ BOUNDS = {
     # normally built in, and the reported quarter-chord sweep is the number to
     # watch: with taper it sits well forward of the leading-edge value.
     "le_sweep_deg": (0.0, 45.0),
+    # Battery chordwise position, as the chord fraction of its forward face.
+    # Bounded away from the leading edge because the nose has no depth there at
+    # all, and away from the trailing edge because the battery still has to fit
+    # ahead of it.
+    "battery_station": (0.02, 0.40),
 }
 
 

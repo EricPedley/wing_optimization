@@ -58,13 +58,16 @@ THRUST_PER_MOTOR = 0.035     # kgf, ~35 g.  UNMEASURED -- see note above.
 PROP_DIAMETER = 0.051        # m, 2 inch
 
 BATTERY_LENGTH = 0.065       # m, drives the minimum root chord
-MIN_ROOT_THICKNESS = 0.015   # m, drives the minimum root thickness
+BATTERY_THICKNESS = 0.011    # m, depth the section must provide where it sits
+MIN_ROOT_THICKNESS = 0.015   # m, floor regardless of what the battery needs
 
-# Chord fraction where the battery's forward face sits.  Kept well forward
-# both because that is where the section is deepest and because the battery is
-# the densest single item, so its position dominates the centre of gravity --
-# and a tailsitter flying wing needs its CG forward to be stable in cruise.
-BATTERY_STATION = 0.00
+# Chord fraction where the battery's forward face sits.  A design variable now
+# rather than a constant, because it trades against root thickness in a way that
+# is not obvious: forward is better for the centre of gravity, but the section
+# is still thin near the nose, so a battery pushed forward forces a thicker root
+# to keep the same depth under it.  The starting value is nose-ward; the
+# optimizer moves it.
+BATTERY_STATION_DEFAULT = 0.05
 
 # The servo is a box, and which of its dimensions binds depends on how it is
 # mounted, so all three are named separately rather than collapsed into one
@@ -105,6 +108,10 @@ CONSTANT_CHORD_ELEVON = True
 # Minimum elevon chord that can actually be built: below this there is no room
 # for a hinge, a horn, and a pushrod attachment.
 MIN_ELEVON_CHORD = 0.012     # m
+
+# Fixed wing left outboard of the elevon, so the hinge has structure to anchor
+# into at its outer end rather than terminating in mid-air at the wingtip.
+ELEVON_TIP_MARGIN = 0.010    # m
 
 # Thickness ratio band, from published low-Reynolds-number section data rather
 # than from anything this model computes -- nothing here predicts Cl_max against
@@ -501,19 +508,30 @@ def total_mass(root_chord, tip_chord, root_thickness, tip_thickness):
 def thickness_at(x, max_thickness):
     """Section thickness at chord fraction ``x``, given the maximum thickness.
 
-    A crude but adequate profile: thickness rises from zero at the leading edge
-    to its maximum at MAX_THICKNESS_STATION, then falls roughly quadratically to
-    near zero at the trailing edge.  Only the aft branch matters for packaging,
-    since everything competing for space sits behind the leading edge.
+    The NACA four-digit thickness distribution, a placeholder standing in until
+    a section is actually chosen.  It is used rather than something simpler
+    because the leading-edge shape decides how much room there is at the front
+    of the section, which is where the battery wants to sit.  A profile that
+    rises linearly from zero understates that room badly: the real nose goes as
+    sqrt(x), so a section is already at half its maximum thickness by 5% chord,
+    not by 15%.
 
-    This is what makes servo chordwise position a real design variable rather
-    than a detail: at 45% chord a section is still near full thickness, while at
-    the 75% hinge line it has thinned by half.
+    Normalized so the maximum equals ``max_thickness`` exactly, since the raw
+    polynomial peaks at 0.1 for a nominal t/c of 0.2, and everything downstream
+    treats the argument as the true maximum.
+
+    Note this puts maximum thickness at 30% chord, which is where the four-digit
+    family puts it and close to MAX_THICKNESS_STATION.
     """
-    fore = x / MAX_THICKNESS_STATION
-    aft = 1.0 - ((x - MAX_THICKNESS_STATION) / (1.0 - MAX_THICKNESS_STATION)) ** 2
-    shape = jnp.where(x < MAX_THICKNESS_STATION, fore, aft)
-    return max_thickness * jnp.clip(shape, 0.0, 1.0)
+    xc = jnp.clip(x, 0.0, 1.0)
+    shape = (0.2969 * jnp.sqrt(jnp.maximum(xc, 1e-12))
+             - 0.1260 * xc
+             - 0.3516 * xc ** 2
+             + 0.2843 * xc ** 3
+             - 0.1015 * xc ** 4)
+    # The polynomial's own peak, so the returned maximum is exactly the value
+    # asked for regardless of the coefficients above.
+    return max_thickness * shape / 0.1000
 
 
 def local_geometry(root_chord, tip_chord, root_thickness, tip_thickness,
@@ -587,8 +605,27 @@ def pushrod_length(chord, servo_station, x_hinge):
     return (x_hinge - servo_station) * chord
 
 
+def battery_slack(root_chord, root_thickness, battery_station):
+    """Room around the battery at its chordwise station, in m.
+
+    Two checks, and they pull in opposite directions along the chord.  The
+    battery must fit between its station and the trailing edge, which wants it
+    forward; and the section must be deep enough for it at its *shallowest*
+    point, which is its forward face, and that wants it aft.
+
+    Depth is evaluated at the forward face rather than the centre because the
+    nose is where the section runs out of room: with a realistic sqrt(x) nose a
+    battery at 5% chord sits under noticeably less depth than one at 15%, and
+    checking the middle of the box would miss that entirely.
+    """
+    length_slack = (1.0 - battery_station) * root_chord - BATTERY_LENGTH
+    depth_slack = (thickness_at(battery_station, root_thickness)
+                   - BATTERY_THICKNESS)
+    return jnp.minimum(length_slack, depth_slack)
+
+
 def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
-                 servo_station, servo_span_fraction, x_hinge):
+                 servo_station, servo_span_fraction, x_hinge, battery_station):
     """How much room the wing has beyond what it must hold, in m.
 
     Positive means everything fits.  The battery and the servos are checked at
@@ -599,7 +636,7 @@ def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
     model previously invented, making the design look infeasible when it was
     only badly drawn.
     """
-    chord_slack = root_chord - BATTERY_LENGTH
+    battery = battery_slack(root_chord, root_thickness, battery_station)
     thickness_slack = root_thickness - MIN_ROOT_THICKNESS
 
     chord, thickness = local_geometry(root_chord, tip_chord, root_thickness,
@@ -614,7 +651,7 @@ def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
     # section out to roughly half its own width either side of the centreline.
     span_slack = servo_span_fraction * 0.5 * SPAN - 0.5 * SERVO_WIDTH
 
-    return jnp.minimum(jnp.minimum(chord_slack, thickness_slack),
+    return jnp.minimum(jnp.minimum(battery, thickness_slack),
                        jnp.minimum(servo, span_slack))
 
 
@@ -686,13 +723,13 @@ def angular_acceleration(moment, inertia_value):
 
 DESIGN_VARS = ["root_chord", "tip_chord", "root_thickness", "tip_thickness",
                "x_hinge", "elevon_inboard_frac", "motor_frac", "servo_station",
-               "servo_span_frac", "le_sweep_deg"]
+               "servo_span_frac", "le_sweep_deg", "battery_station"]
 
 
 def unpack(p):
     """Design vector to named geometry, with span fractions turned into metres."""
     (root_chord, tip_chord, root_t, tip_t, x_hinge, elevon_in_f, motor_f,
-     servo_station, servo_span_f, le_sweep_deg) = p
+     servo_station, servo_span_f, le_sweep_deg, battery_station) = p
     semi = 0.5 * SPAN
     servo_chord, servo_thickness = local_geometry(
         root_chord, tip_chord, root_t, tip_t, servo_span_f)
@@ -703,9 +740,12 @@ def unpack(p):
         "tip_thickness": tip_t,
         "x_hinge": x_hinge,
         "elevon_inboard_y": elevon_in_f * semi,
-        "elevon_outboard_y": semi,
+        # The elevon stops short of the tip so the hinge has structure to anchor
+        # into at its outboard end instead of ending in mid-air.
+        "elevon_outboard_y": semi - ELEVON_TIP_MARGIN,
         "motor_y": motor_f * semi,
         "servo_station": servo_station,
+        "battery_station": battery_station,
         "servo_span_frac": servo_span_f,
         "servo_y": servo_span_f * semi,
         "servo_chord": servo_chord,
@@ -791,9 +831,13 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "volume_slack": volume_slack(
             g["root_chord"], g["tip_chord"],
             g["root_thickness"], g["tip_thickness"],
-            g["servo_station"], g["servo_span_frac"], g["x_hinge"]),
+            g["servo_station"], g["servo_span_frac"], g["x_hinge"],
+            g["battery_station"]),
         "servo_depth_available": thickness_at(
             g["servo_station"], g["servo_thickness"]),
+        "battery_depth_available": thickness_at(
+            g["battery_station"], g["root_thickness"]),
+        "battery_station": g["battery_station"],
         "pushrod_length": pushrod_length(
             g["servo_chord"], g["servo_station"], g["x_hinge"]),
         "yaw_moment": yaw_moment(0.5 * thrust_hover, g["motor_y"]),
@@ -824,7 +868,10 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
                            g["elevon_inboard_y"] / (0.5 * SPAN))[0],
             g["x_hinge"], mac),
         "elevon_chord_outboard": elevon_chord_at(
-            g["tip_chord"], g["x_hinge"], mac),
+            local_geometry(g["root_chord"], g["tip_chord"],
+                           g["root_thickness"], g["tip_thickness"],
+                           g["elevon_outboard_y"] / (0.5 * SPAN))[0],
+            g["x_hinge"], mac),
         "i_roll": i_roll,
         "i_pitch": i_pitch,
         "i_yaw": i_yaw,
@@ -1003,6 +1050,7 @@ BASELINE = jnp.array([
     20.0,    # le_sweep_deg, aft.  Enough to pull the quarter chord back to
              # roughly neutral against this taper; there is no stability model
              # here to choose it properly.
+    BATTERY_STATION_DEFAULT,   # battery_station, chord fraction of its nose
 ])
 
 
@@ -1048,8 +1096,10 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
     rc = float(g["root_chord"])
     rt = float(g["root_thickness"])
     sc = float(g["servo_chord"])
+    bs = float(g["battery_station"])
     terms = {
-        "battery chord": rc - BATTERY_LENGTH,
+        "battery length": (1.0 - bs) * rc - BATTERY_LENGTH,
+        "battery depth": float(r["battery_depth_available"]) - BATTERY_THICKNESS,
         "min thickness": rt - MIN_ROOT_THICKNESS,
         "servo depth": float(r["servo_depth_available"]) - SERVO_DEPTH,
         "servo/hinge clearance": (
@@ -1065,6 +1115,7 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "servo inside elevon (out)": (
             float(g["elevon_outboard_y"])
             - float(g["servo_y"]) - 0.5 * SERVO_WIDTH),
+        "elevon tip anchor": 0.5 * SPAN - float(g["elevon_outboard_y"]),
     }
     binding = min(terms, key=terms.get)
     for name, value in terms.items():
