@@ -68,9 +68,14 @@ SERVO_THICKNESS = 0.008      # m, servo body depth at the hinge line
 # what makes the servo rather than the battery the binding volume constraint.
 HINGE_THICKNESS_FRACTION = 0.5
 
-# Foaming PLA printed as a hollow shell.  Areal density is wall thickness times
-# foamed density; 0.4 mm walls of LW-PLA at ~0.6 g/cm^3 gives ~0.24 kg/m^2.
-SKIN_AREAL_DENSITY = 0.24    # kg/m^2 of wetted area
+# Printed as a hollow shell, so skin mass is wall thickness times material
+# density.  Set FILAMENT_DENSITY to the *as-printed* density, not the spool
+# figure: LW-PLA foams to roughly 0.4-0.6 g/cm^3 when printed hot enough to
+# activate, and stays near 1.2 g/cm^3 when it does not.  The difference is a
+# factor of two or three in wing mass, which propagates straight into TWR.
+WALL_THICKNESS = 0.4e-3      # m
+FILAMENT_DENSITY = 900.0     # kg/m^3, as printed
+SKIN_AREAL_DENSITY = WALL_THICKNESS * FILAMENT_DENSITY  # kg/m^2 of wetted area
 
 # --- Model constants ----------------------------------------------------------
 
@@ -507,3 +512,96 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
 
 
 evaluate_jit = jax.jit(evaluate, static_argnames=())
+
+
+# Current best guess at the configuration, in DESIGN_VARS order.  Root chord is
+# well above the 75 mm the battery alone would need, because the servo forces
+# 16 mm of root thickness and a longer chord is what keeps that from being an
+# unflyable thickness ratio at this Reynolds number.
+BASELINE = jnp.array([
+    0.105,   # root_chord, m
+    0.074,   # tip_chord, m  (taper 0.70; less taper keeps tip Re up)
+    0.016,   # root_thickness, m  (set by servo depth at the hinge)
+    0.006,   # tip_thickness, m
+    0.75,    # x_hinge  (25% chord elevon, where dCm/deta peaks)
+    0.30,    # elevon_inboard_frac
+    0.47,    # motor_frac
+])
+
+
+def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
+    """Print a readable summary of one design point."""
+    p = BASELINE if p is None else p
+    g = unpack(p)
+    r = evaluate(p, v_cruise=v_cruise, cl_max=cl_max,
+                 deflection_deg=deflection_deg)
+
+    print("=== Geometry ===")
+    print(f"  root chord      {float(g['root_chord']) * 1e3:8.1f} mm")
+    print(f"  tip chord       {float(g['tip_chord']) * 1e3:8.1f} mm"
+          f"   (taper {float(g['tip_chord'] / g['root_chord']):.2f})")
+    print(f"  root t/c        {float(r['root_tc']) * 100:8.1f} %"
+          f"   ({float(g['root_thickness']) * 1e3:.1f} mm)")
+    print(f"  tip t/c         {float(r['tip_tc']) * 100:8.1f} %"
+          f"   ({float(g['tip_thickness']) * 1e3:.1f} mm)")
+    print(f"  area            {float(r['area']) * 1e4:8.1f} cm^2")
+    print(f"  aspect ratio    {float(r['aspect_ratio']):8.2f}")
+    print(f"  MAC             {float(r['mac']) * 1e3:8.1f} mm")
+
+    print("\n=== Mass and performance ===")
+    print(f"  all-up mass     {float(r['mass']) * 1e3:8.1f} g")
+    print(f"  thrust/weight   {float(r['twr']):8.2f}"
+          f"   {'OK' if float(r['twr']) > 1.0 else 'CANNOT HOVER'}")
+    print(f"  wing loading    {float(r['wing_loading']):8.1f} N/m^2")
+    print(f"  stall speed     {float(r['v_stall']):8.1f} m/s"
+          f"   (at Cl_max {cl_max})")
+    print(f"  Re at MAC       {float(r['re_mac']):8,.0f}")
+    print(f"  Re at tip       {float(r['re_tip']):8,.0f}"
+          f"   {'-- very low' if float(r['re_tip']) < 30000 else ''}")
+
+    print("\n=== Packaging ===")
+    slack = float(r['volume_slack']) * 1e3
+    print(f"  volume slack    {slack:+8.1f} mm"
+          f"   {'FITS' if slack >= 0 else 'DOES NOT FIT'}")
+    print(f"    battery needs {BATTERY_LENGTH * 1e3:.0f} mm chord,"
+          f" {BATTERY_THICKNESS * 1e3:.0f} mm thickness")
+    print(f"    servo needs   {SERVO_THICKNESS * 1e3:.0f} mm at the hinge,"
+          f" so {SERVO_THICKNESS / HINGE_THICKNESS_FRACTION * 1e3:.0f} mm at the root")
+
+    print("\n=== Elevon and motors ===")
+    print(f"  hinge at        {float(g['x_hinge']) * 100:8.0f} % chord"
+          f"   ({(1 - float(g['x_hinge'])) * 100:.0f}% chord elevon)")
+    print(f"  effectiveness   {float(r['flap_effectiveness']):8.3f}"
+          f"   deg alpha per deg elevon")
+    print(f"  elevon span     {float(g['elevon_inboard_y']) * 1e3:.0f}"
+          f" to {float(g['elevon_outboard_y']) * 1e3:.0f} mm from centreline")
+    print(f"  motor at        {float(g['motor_y']) * 1e3:8.1f} mm"
+          f"   ({float(g['motor_y']) / (0.5 * SPAN) * 100:.0f}% semi-span)")
+    print(f"  wash fraction   {float(r['wash_fraction']):8.2f}"
+          f"   of elevon span in the slipstream")
+    print(f"  yaw moment      {float(r['yaw_moment']) * 1e3:8.2f} mN.m"
+          f"   at 50% differential thrust")
+
+    print(f"\n=== Control authority at {deflection_deg:.0f} deg deflection ===")
+    print(f"  {'condition':<14}{'q [Pa]':>9}{'pitch':>10}{'roll':>10}"
+          f"{'hinge':>10}   (mN.m)")
+    for name, a in r["authority"].items():
+        print(f"  {name:<14}{float(a['q']):9.1f}{float(a['pitch']) * 1e3:10.3f}"
+              f"{float(a['roll']) * 1e3:10.3f}{float(a['hinge']) * 1e3:10.3f}")
+
+    h_max = max(float(a["hinge"]) for a in r["authority"].values())
+    print(f"\n  peak hinge moment {h_max * 1e3:.3f} mN.m"
+          f" = {h_max * 1e4 / G:.2f} g.cm"
+          f"  ({3 * h_max * 1e4 / G:.2f} g.cm with 3x margin)")
+
+    print("\n=== Deflection roll-off ===")
+    for d in (5, 10, 15, 20, 25, 30):
+        eff = float(flap_deflection_efficiency(float(d)))
+        print(f"  {d:2d} deg   efficiency {eff:.3f}"
+              f"   worth {d * eff:5.1f} deg of ideal deflection")
+
+    return r
+
+
+if __name__ == "__main__":
+    report()
