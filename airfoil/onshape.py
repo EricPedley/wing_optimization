@@ -21,9 +21,11 @@ would keep a sketch alive while the model has moved on -- but it means this must
 never be pointed at a studio that also holds hand-authored variables.
 
 Authentication uses an Onshape API key pair as HTTP Basic credentials, read from
-the environment or from a gitignored file.  Onshape also offers a signed-request
-scheme; Basic over TLS is supported for API keys and avoids a signing
-implementation whose failures are hard to distinguish from bad credentials.
+the environment or from ``~/.onshape_keys.json``, which is outside the repository
+so that no gitignore rule stands between the secret and a commit.  Onshape also
+offers a signed-request scheme; Basic over TLS is supported for API keys and
+avoids a signing implementation whose failures are hard to distinguish from bad
+credentials.
 
     export ONSHAPE_ACCESS_KEY=...      # from https://dev-portal.onshape.com
     export ONSHAPE_SECRET_KEY=...
@@ -68,14 +70,11 @@ VARIABLE_STUDIO_ID = "582f9860e2a4d3ebb75947a9"
 # thing the variables endpoint cannot report.
 AIRFRAME_STUDIO_ID = "95f58a3d91f86a3c91fa172e"
 
-# Credentials files, searched in order when the environment does not carry the
-# keys.  JSON with "access_key" and "secret_key".  The repo copy is gitignored
-# and comes first so a key scoped to this document overrides a general one in
-# the home directory rather than the other way round.
-CREDENTIALS_PATHS = (
-    Path(__file__).resolve().parent.parent / ".onshape_keys.json",
-    Path.home() / ".onshape_keys.json",
-)
+# Credentials file, used when the environment does not carry the keys.  JSON with
+# "access_key" and "secret_key".  Deliberately outside the repository: a secret
+# inside the working tree is one `git add -A` away from being committed, and the
+# gitignore that would prevent that is itself a file someone can change.
+CREDENTIALS_PATH = Path.home() / ".onshape_keys.json"
 
 
 # --- Authentication -----------------------------------------------------------
@@ -92,21 +91,18 @@ def credentials():
     if access and secret:
         return access, secret
 
-    for path in CREDENTIALS_PATHS:
-        if not path.exists():
-            continue
-        data = json.loads(path.read_text())
+    if CREDENTIALS_PATH.exists():
+        data = json.loads(CREDENTIALS_PATH.read_text())
         access = data.get("access_key")
         secret = data.get("secret_key")
         if access and secret:
             return access, secret
 
-    searched = " or ".join(str(p) for p in CREDENTIALS_PATHS)
     raise RuntimeError(
         "No Onshape credentials.  Create an API key at "
         "https://dev-portal.onshape.com (scopes: read and write), then either\n"
         "  export ONSHAPE_ACCESS_KEY=... ONSHAPE_SECRET_KEY=...\n"
-        f"or write {{\"access_key\": ..., \"secret_key\": ...}} to {searched}"
+        f"or write {{\"access_key\": ..., \"secret_key\": ...}} to {CREDENTIALS_PATH}"
     )
 
 
