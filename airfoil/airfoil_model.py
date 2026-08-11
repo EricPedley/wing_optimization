@@ -34,6 +34,8 @@ the leading edge as a fraction of chord, flap deflection eta positive downward,
 pitching moment positive nose-up.
 """
 
+import functools
+
 import jax
 import jax.numpy as jnp
 
@@ -83,6 +85,37 @@ SERVO_LENGTH = 0.021         # m, longest dimension, lies along the chord
 SERVO_DEPTH = 0.008          # m, the dimension that fights section thickness
 SERVO_WIDTH = 0.015          # m, spanwise
 
+# Linear servo output force at stall.
+#
+# PLACEHOLDER -- not from the datasheet.  Replace with the real stall force,
+# derated for the duty cycle the elevon actually sees.  Everything downstream of
+# this number is only as good as it is, and the elevon size the optimizer
+# returns moves roughly as its square root.
+SERVO_MAX_FORCE = 1.0        # N
+
+# Worst-case mechanical advantage of the pushrod linkage, in metres of hinge
+# torque per newton of servo force (tau = F * this).
+#
+# Measured, not assumed: linkage.linkage_model.metrics(p)["min"] at the current
+# slider geometry p = [15.3, 3.55, 9.0, 0.0, 10.0], which returns 7.71 in the
+# millimetre units that model works in.  The "min" metric rather than "peak" or
+# "area" because the servo has to drive the elevon everywhere in its travel, so
+# the worst point in the sweep is what decides whether it stalls.
+#
+# This is the weak-coupling assumption: the linkage is optimized separately and
+# its advantage enters here as a constant.  It holds as long as the linkage
+# geometry is not re-optimized per airfoil design point.  If the two ever need
+# to be solved together, this constant is the seam to cut at.
+LINKAGE_ADVANTAGE = 0.00771  # m, = 7.71 mm
+
+# Safety factor on the required servo force.
+#
+# The hinge moment model is the weakest part of this file -- see hinge_moment,
+# whose coefficients are representative plain-flap values rather than anything
+# derived or measured -- so the constraint is applied against a derated servo
+# rather than pretending the prediction is tight.
+SERVO_FORCE_MARGIN = 1.5
+
 # Wiring reach.  Both are hard limits set by the harness that already exists,
 # not by aerodynamics, and both bind against things the optimizer wants: it
 # pushes the motors outboard for yaw authority and the servos outboard to sit
@@ -103,7 +136,7 @@ MAX_SERVO_Y = 0.060          # m from the centreline
 # root to 0.28 at the tip here), so the section flap derivatives vary too.  They
 # are evaluated at the mean aerodynamic chord, which is the standard
 # approximation and good to a few percent over this range.
-CONSTANT_CHORD_ELEVON = True
+CONSTANT_CHORD_ELEVON = False
 
 # Minimum elevon chord that can actually be built: below this there is no room
 # for a hinge, a horn, and a pushrod attachment.
@@ -436,6 +469,21 @@ def hinge_moment(deflection_deg, x_hinge, thrust_n, v_inf, motor_y,
     ch = ch_alpha * jnp.radians(alpha_deg) + ch_delta * jnp.radians(deflection_deg)
 
     return q * (elevon_chord ** 2) * elevon_span * jnp.abs(ch)
+
+
+def servo_force(hinge_moment_nm):
+    """Servo force needed to hold a hinge moment, in N.
+
+    Virtual work through the linkage: the servo pushes F along its rail while
+    the elevon absorbs tau at the hinge, so F = tau / (dx/dtheta) and the
+    denominator is exactly the mechanical advantage the linkage model reports.
+
+    This is the term that punishes an oversized elevon.  Authority grows about
+    linearly with elevon chord while hinge moment grows with its square, so past
+    some size the servo saturates and further chord buys deflection the servo
+    cannot hold -- which is to say, no authority at all.
+    """
+    return hinge_moment_nm / jnp.maximum(LINKAGE_ADVANTAGE, 1e-9)
 
 
 # --- Geometry and mass --------------------------------------------------------
@@ -872,6 +920,9 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
             g["elevon_inboard_y"], g["elevon_outboard_y"], mac)
         m_yaw = yaw_moment(
             available_differential_thrust(throttles[name]), g["motor_y"])
+        m_hinge = hinge_moment(
+            deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
+            g["elevon_inboard_y"], g["elevon_outboard_y"], mac)
         authority[name] = {
             "q": elevon_dynamic_pressure(
                 thrust, v, g["motor_y"],
@@ -879,19 +930,27 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
             "pitch": m_pitch,
             "roll": m_roll,
             "yaw": m_yaw,
-            "hinge": hinge_moment(
-                deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
-                g["elevon_inboard_y"], g["elevon_outboard_y"], mac),
+            "hinge": m_hinge,
+            "servo_force": servo_force(m_hinge),
             # Angular accelerations, which is what "enough authority" means.
             "alpha_pitch": angular_acceleration(m_pitch, i_pitch),
             "alpha_roll": angular_acceleration(m_roll, i_roll),
             "alpha_yaw": angular_acceleration(m_yaw, i_yaw),
         }
 
+    # The servo has to cope with the worst condition, not an average one, and
+    # which condition that is moves with the design: hover has the most prop
+    # wash but no freestream, cruise the reverse.  Reduced here rather than in
+    # constraints so the reporting and the constraint see the same number.
+    peak_servo_force = functools.reduce(
+        jnp.maximum, [a["servo_force"] for a in authority.values()])
+
     return {
         "area": area,
         "mac": mac,
         "aspect_ratio": SPAN ** 2 / jnp.maximum(area, 1e-9),
+        "peak_servo_force": peak_servo_force,
+        "servo_force_limit": SERVO_MAX_FORCE / SERVO_FORCE_MARGIN,
         "mass": mass,
         "twr": thrust_to_weight(mass),
         "wing_loading": mass * G / jnp.maximum(area, 1e-9),
@@ -1104,6 +1163,12 @@ def constraints(p, cl_max=0.8, deflection_deg=10.0):
         "elevon_chord": _shortfall(
             jnp.minimum(r["elevon_chord_inboard"], r["elevon_chord_outboard"]),
             MIN_ELEVON_CHORD),
+        # The servo has to actually be able to hold the deflection the
+        # authority constraints above assume it can reach.  Without this the
+        # optimizer sees an elevon as pure upside: authority grows with its
+        # chord and nothing charges for the hinge moment, which grows with the
+        # square of it.  This is the term that makes elevon size a trade.
+        "servo_force": _excess(r["peak_servo_force"], r["servo_force_limit"]),
         # Thickness ratio band.  The lower bound is what keeps the optimizer
         # from thinning the tip into an abrupt-stalling section to save a
         # fraction of a gram of skin.
@@ -1350,6 +1415,15 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
     print(f"\n  peak hinge moment {h_max * 1e3:.3f} mN.m"
           f" = {h_max * 1e4 / G:.2f} g.cm"
           f"  ({3 * h_max * 1e4 / G:.2f} g.cm with 3x margin)")
+
+    f_peak = float(r["peak_servo_force"])
+    f_limit = float(r["servo_force_limit"])
+    print(f"  through a {LINKAGE_ADVANTAGE * 1e3:.2f} mm linkage advantage"
+          f" that is {f_peak:.2f} N at the servo,")
+    print(f"  against {f_limit:.2f} N available"
+          f" ({SERVO_MAX_FORCE:.1f} N stall / {SERVO_FORCE_MARGIN:.1f} margin)"
+          f"   {'OK' if f_peak <= f_limit else 'SERVO STALLS'}"
+          f"   [{f_limit / max(f_peak, 1e-9):.0f}x margin]")
 
     print("\n=== Deflection roll-off ===")
     for d in (5, 10, 15, 20, 25, 30):

@@ -357,10 +357,17 @@ def derived_variables(p):
 
     # Local chord at each elevon end, so the hinge line can be checked against
     # the trailing edge at both ends rather than assumed parallel.
-    entries.append(("cad_chord_at_elevon_inboard", LENGTH, chord_at(elevon_in),
-                    "Local chord at the elevon inboard end"))
-    entries.append(("cad_chord_at_elevon_outboard", LENGTH, chord_at(elevon_out),
-                    "Local chord at the elevon outboard end"))
+    # Local *wing* chord at each elevon end, not the elevon's own chord -- the
+    # model reports the latter under the similar name ``elevon_chord_inboard``,
+    # and the two differ by a factor of three.  Named and described explicitly
+    # here because confusing them puts the hinge line several millimetres off in
+    # a way that still looks plausible on screen.
+    entries.append(("cad_wing_chord_at_elevon_inboard", LENGTH,
+                    chord_at(elevon_in),
+                    "Wing chord at the elevon inboard end (not the elevon chord)"))
+    entries.append(("cad_wing_chord_at_elevon_outboard", LENGTH,
+                    chord_at(elevon_out),
+                    "Wing chord at the elevon outboard end (not the elevon chord)"))
 
     return [_variable(name, var_type, value, note)
             for name, var_type, value, note in entries]

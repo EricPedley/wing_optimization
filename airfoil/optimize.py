@@ -12,6 +12,7 @@ the work in Adam is much cheaper for the same optimum.
 Run with ``uv run python -m airfoil.optimize``.
 """
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -65,6 +66,39 @@ BOUNDS = {
     # ahead of it.
     "battery_station": (0.02, 0.40),
 }
+
+
+def _fingerprint():
+    """Hash of everything that decides what the optimum is.
+
+    The cache is only valid for the model that produced it, and the thing that
+    invalidates it in practice is not a new design variable -- that is rare and
+    the name list already catches it -- but an edited constant.  Changing a
+    servo force or a constraint floor leaves the design vector the same shape
+    while moving the answer, so without this the stale optimum is reloaded and
+    silently re-reported against limits it was never optimized for.
+
+    Every upper-case module-level name in the model is included rather than a
+    hand-picked list, because a hand-picked list is exactly the kind of thing
+    that stops being complete the first time someone adds a constant and does
+    not think of it.  The cost of over-including is a re-solve after an edit
+    that did not matter; the cost of under-including is a wrong answer that
+    looks right.  The bounds go in for the same reason.
+    """
+    parts = []
+    for name in sorted(dir(am)):
+        if not name.isupper() or name.startswith("_"):
+            continue
+        value = getattr(am, name)
+        if hasattr(value, "tolist"):        # jnp arrays, e.g. BASELINE
+            value = value.tolist()
+        parts.append(f"{name}={value!r}")
+    parts.append(f"BOUNDS={sorted(BOUNDS.items())!r}")
+    # The search itself changes the answer too: fewer starts or steps can land
+    # in a different basin, so a cache from a cheaper run is not interchangeable
+    # with one from a thorough one.
+    parts.append(f"SEARCH={(N_STARTS, ADAM_STEPS, ADAM_LR, N_POLISH, POLISH_ITERS)!r}")
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
 def _bounds_arrays():
@@ -141,6 +175,7 @@ def optimize(save=True):
     if save:
         RESULT_PATH.write_text(json.dumps({
             "design_vars": list(am.DESIGN_VARS),
+            "fingerprint": _fingerprint(),
             "x": [float(v) for v in np.asarray(best_x)],
             "cost": result["cost"],
         }, indent=2) + "\n")
@@ -153,12 +188,23 @@ def load_optimum():
     Returned as a plain array in DESIGN_VARS order.  The variable names are
     stored alongside it and checked, so a stale cache from before a design
     variable was added or reordered is rejected rather than silently
-    misinterpreted as a valid geometry.
+    misinterpreted as a valid geometry.  A fingerprint of the model constants
+    and the bounds is checked for the same reason -- see _fingerprint -- so an
+    optimum from before a constant was edited is rejected too.
     """
     if not RESULT_PATH.exists():
         return None
     data = json.loads(RESULT_PATH.read_text())
     if data.get("design_vars") != list(am.DESIGN_VARS):
+        return None
+    if data.get("fingerprint") != _fingerprint():
+        # Say so rather than returning None quietly.  Every caller falls back to
+        # the baseline, so a silent rejection looks identical to a plot of the
+        # optimum -- which is the same failure this check exists to prevent,
+        # just with the baseline in the stale optimum's place.
+        print(f"{RESULT_PATH.name} is stale: the model constants or bounds have"
+              " changed since it was written.  Falling back to the baseline;"
+              " re-run 'python -m airfoil.optimize' to refresh it.")
         return None
     return jnp.asarray(data["x"], dtype=jnp.float64)
 
