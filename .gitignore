@@ -1,1 +1,4 @@
 __pycache__
+
+# Onshape API key pair, if kept in the repo rather than in ~ or the environment.
+.onshape_keys.json
