@@ -176,7 +176,7 @@ def planform_figure(p=None):
 
     servo_y = float(g["servo_y"])
     servo_c = float(g["servo_chord"])
-    station = float(g["servo_station"])
+    station = float(g["servo_chord_frac"])
     for sign in (1, -1):
         y0 = sign * servo_y - 0.5 * am.SERVO_WIDTH
         y1 = sign * servo_y + 0.5 * am.SERVO_WIDTH
@@ -241,7 +241,7 @@ def section_figure(p=None):
 
     chord = float(g["root_chord"])
     thick = float(g["root_thickness"])
-    station = float(g["servo_station"])
+    station = float(g["servo_chord_frac"])
     mac = float(r["mac"])
 
     # Hinge fraction at *this* section, which is not the design variable when
@@ -334,7 +334,7 @@ def fit_figure(p=None):
     # The servo's own section, not the root: it sits outboard, where the wing is
     # both shorter in chord and thinner, so the root would flatter it.
     thick = float(g["servo_thickness"])
-    station = float(g["servo_station"])
+    station = float(g["servo_chord_frac"])
 
     x = np.linspace(0.02, 0.95, 200)
     depth = np.asarray(am.thickness_at(x, thick))
@@ -386,7 +386,7 @@ def fit_figure(p=None):
     return fig
 
 
-def authority_figure(p=None, deflection_deg=10.0):
+def authority_figure(p=None, deflection_deg=None):
     """Control moment by flight regime, on a log axis.
 
     Log scale because hover and cruise differ by roughly an order of magnitude,
@@ -469,7 +469,12 @@ _VAR_UNITS = {
     "x_hinge": ("% chord", 1e2),
     "elevon_inboard_frac": ("% semi", 1e2),
     "motor_frac": ("% semi", 1e2),
-    "servo_station": ("% chord", 1e2),
+    "servo_chord_frac": ("% chord", 1e2),
+    "servo_height": ("mm", 1.0),
+    "servo_rod_dy": ("mm", 1.0),
+    "servo_travel_mm": ("mm", 1.0),
+    "flap_x_mm": ("mm", 1.0),
+    "flap_y_mm": ("mm", 1.0),
     "servo_span_frac": ("% semi", 1e2),
     "le_sweep_deg": ("deg", 1.0),
     "battery_station": ("% chord", 1e2),

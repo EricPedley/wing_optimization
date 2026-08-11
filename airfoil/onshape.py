@@ -215,7 +215,13 @@ def design_variables(p):
     table.  Fractions stay fractions here rather than being converted, because
     this set exists to be comparable with the model, not to be drawn with.
     """
-    values = [float(v) for v in p]
+    # The linkage variables are already millimetres while everything else is
+    # metres, and _variable multiplies a LENGTH by 1e3 to emit millimetres.
+    # Scale them back so they are not written to CAD a thousand times too big.
+    mm_vars = {"servo_height", "servo_rod_dy", "servo_travel_mm",
+               "flap_x_mm", "flap_y_mm"}
+    values = [float(v) / 1e3 if n in mm_vars else float(v)
+              for n, v in zip(am.DESIGN_VARS, p)]
     types = {
         "root_chord": LENGTH,
         "tip_chord": LENGTH,
@@ -224,10 +230,15 @@ def design_variables(p):
         "x_hinge": NUMBER,
         "elevon_inboard_frac": NUMBER,
         "motor_frac": NUMBER,
-        "servo_station": NUMBER,
+        "servo_chord_frac": NUMBER,
         "servo_span_frac": NUMBER,
         "le_sweep_deg": ANGLE,
         "battery_station": NUMBER,
+        "servo_height": LENGTH,
+        "servo_rod_dy": LENGTH,
+        "servo_travel_mm": LENGTH,
+        "flap_x_mm": LENGTH,
+        "flap_y_mm": LENGTH,
     }
     notes = {
         "root_chord": "Root chord",
@@ -237,10 +248,15 @@ def design_variables(p):
         "x_hinge": "Hinge station as a chord fraction at the MAC",
         "elevon_inboard_frac": "Elevon inboard end, fraction of semi-span",
         "motor_frac": "Motor spanwise station, fraction of semi-span",
-        "servo_station": "Servo centre, fraction of local chord",
+        "servo_chord_frac": "Servo centre, fraction of local chord",
         "servo_span_frac": "Servo spanwise station, fraction of semi-span",
         "le_sweep_deg": "Leading-edge sweep, positive aft",
         "battery_station": "Battery forward face, fraction of root chord",
+        "servo_height": "Servo body depth off the hinge axis",
+        "servo_rod_dy": "Control rod pickup, offset from the servo body",
+        "servo_travel_mm": "Servo stroke",
+        "flap_x_mm": "Horn attachment along the flap",
+        "flap_y_mm": "Horn radius perpendicular to the flap",
     }
     return [_variable(name, types[name], value, notes[name])
             for name, value in zip(am.DESIGN_VARS, values)]
@@ -335,7 +351,7 @@ def derived_variables(p):
         # section, carried back to the root datum by the sweep offset.
         ("cad_servo_y", LENGTH, servo_y, "Servo centre from the centreline"),
         ("cad_servo_x", LENGTH,
-         le_at(servo_y) + float(g["servo_station"]) * servo_chord,
+         le_at(servo_y) + float(g["servo_chord_frac"]) * servo_chord,
          "Servo centre aft of the root leading edge"),
         ("cad_servo_length", LENGTH, am.SERVO_LENGTH, "Servo body, chordwise"),
         ("cad_servo_width", LENGTH, am.SERVO_WIDTH, "Servo body, spanwise"),

@@ -52,7 +52,7 @@ BOUNDS = {
     # design vector holds; the constraints check the same limits in metres, so a
     # violation is caught even if these bounds are widened.
     "motor_frac": (0.20, am.MAX_MOTOR_Y / (0.5 * am.SPAN)),
-    "servo_station": (0.20, 0.70),
+    "servo_chord_frac": (0.20, 0.70),
     "servo_span_frac": (0.15, am.MAX_SERVO_Y / (0.5 * am.SPAN)),
     # Leading-edge sweep.  Nothing in the objective rewards or penalizes it --
     # there is no stability model -- so the optimizer will leave it wherever it
@@ -65,6 +65,35 @@ BOUNDS = {
     # all, and away from the trailing edge because the battery still has to fit
     # ahead of it.
     "battery_station": (0.02, 0.40),
+    # --- Linkage, all in millimetres.  These feed linkage_model directly, which
+    # works in mm; airfoil.linkage_coupling is where the two unit systems meet.
+    #
+    # Servo body depth off the hinge axis.  Capped by how deep the section is
+    # where the servo sits.  The servo_rail_depth constraint enforces that
+    # properly against the real local thickness; this box is only a sane outer
+    # limit so the optimizer does not waste starts on absurd geometry.
+    "servo_height": (0.0, 6.0),
+    # Where the control rod attaches on the servo end, as an offset from the
+    # body depth above.  A short range because the pickup is a feature on the
+    # servo arm, not a free-floating point: it is somewhere near the body, above
+    # or below it, but not far from it.
+    "servo_rod_dy": (-3.0, 3.0),
+    # Fixed at the servo's actual stroke.  A degenerate box rather than a
+    # special case, so DESIGN_VARS, BOUNDS, and unpack all stay uniform and
+    # widening it later is a one-line edit.  _solve guards the zero width.
+    "servo_travel_mm": (9.0, 9.0),
+    # Horn offset along the flap.  The hinge-side attachment is nearly free --
+    # it is a printed feature on a part that does not have to fit inside
+    # anything -- so these bounds are deliberately loose and exist only to keep
+    # the search in a region where a horn is still a horn.
+    "flap_x_mm": (-15.0, 15.0),
+    # Horn radius.  The design variable of this set: advantage scales with it
+    # and throw inversely, their product pinned near servo_travel by virtual
+    # work.  Floored at 5 mm because the linkage goes dead below that.  The
+    # ceiling is structural, not aerodynamic -- a control horn is meant to stand
+    # proud of the surface, so what limits it is how long a printed horn can be
+    # before it flexes under the hinge load, not the section depth.
+    "flap_y_mm": (5.0, 18.0),
 }
 
 
@@ -86,13 +115,16 @@ def _fingerprint():
     looks right.  The bounds go in for the same reason.
     """
     parts = []
-    for name in sorted(dir(am)):
-        if not name.isupper() or name.startswith("_"):
-            continue
-        value = getattr(am, name)
-        if hasattr(value, "tolist"):        # jnp arrays, e.g. BASELINE
-            value = value.tolist()
-        parts.append(f"{name}={value!r}")
+    # The linkage model is part of the answer now, so its constants belong in
+    # the hash for the same reason the airfoil model's do.
+    for module in (am, am.linkage_coupling, am.linkage_coupling.lm):
+        for name in sorted(dir(module)):
+            if not name.isupper() or name.startswith("_"):
+                continue
+            value = getattr(module, name)
+            if hasattr(value, "tolist"):    # jnp arrays, e.g. BASELINE
+                value = value.tolist()
+            parts.append(f"{module.__name__}.{name}={value!r}")
     parts.append(f"BOUNDS={sorted(BOUNDS.items())!r}")
     # The search itself changes the answer too: fewer starts or steps can land
     # in a different basin, so a cache from a cheaper run is not interchangeable
@@ -113,7 +145,12 @@ def _solve(x0s, lower, upper):
         return am.cost(x)
 
     grads = jax.vmap(jax.grad(fun))
-    scale = upper - lower
+    # Guarded because a pinned variable (lower == upper, which is how a fixed
+    # quantity like the servo stroke is expressed) would otherwise divide the
+    # gradient by zero.  That does not just break the pinned variable: the inf
+    # propagates through the shared Adam moment state and NaNs the whole vector.
+    # The clip below pins the value exactly regardless of what scale says.
+    scale = jnp.maximum(upper - lower, 1e-9)
 
     def adam_step(state, k):
         x, m, v, t = state

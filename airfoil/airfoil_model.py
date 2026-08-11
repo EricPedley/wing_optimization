@@ -39,6 +39,8 @@ import functools
 import jax
 import jax.numpy as jnp
 
+from airfoil import linkage_coupling
+
 jax.config.update("jax_enable_x64", True)
 
 # --- Physical constants -------------------------------------------------------
@@ -78,9 +80,9 @@ BATTERY_STATION_DEFAULT = 0.05
 # dimension that has to fit inside the section thickness.
 #
 # At 15 mm deep this servo is nearly as thick as the whole root section, so it
-# is the dominant packaging constraint and the reason servo_station is a design
-# variable: it only fits near maximum thickness, and it may not fit at all
-# without either a deeper root or mounting it on its side.
+# is the dominant packaging constraint and the reason servo_chord_frac is a
+# design variable: it only fits near maximum thickness, and it may not fit at
+# all without either a deeper root or mounting it on its side.
 SERVO_LENGTH = 0.021         # m, longest dimension, lies along the chord
 SERVO_DEPTH = 0.008          # m, the dimension that fights section thickness
 SERVO_WIDTH = 0.015          # m, spanwise
@@ -93,20 +95,10 @@ SERVO_WIDTH = 0.015          # m, spanwise
 # returns moves roughly as its square root.
 SERVO_MAX_FORCE = 1.0        # N
 
-# Worst-case mechanical advantage of the pushrod linkage, in metres of hinge
-# torque per newton of servo force (tau = F * this).
-#
-# Measured, not assumed: linkage.linkage_model.metrics(p)["min"] at the current
-# slider geometry p = [15.3, 3.55, 9.0, 0.0, 10.0], which returns 7.71 in the
-# millimetre units that model works in.  The "min" metric rather than "peak" or
-# "area" because the servo has to drive the elevon everywhere in its travel, so
-# the worst point in the sweep is what decides whether it stalls.
-#
-# This is the weak-coupling assumption: the linkage is optimized separately and
-# its advantage enters here as a constant.  It holds as long as the linkage
-# geometry is not re-optimized per airfoil design point.  If the two ever need
-# to be solved together, this constant is the seam to cut at.
-LINKAGE_ADVANTAGE = 0.00771  # m, = 7.71 mm
+# The linkage's mechanical advantage used to be a constant here, measured from a
+# separate optimization of the linkage alone.  It is now a design output --
+# the linkage geometry is part of the same design vector as the wing, and the
+# advantage falls out of it.  See airfoil.linkage_coupling.
 
 # Safety factor on the required servo force.
 #
@@ -471,19 +463,24 @@ def hinge_moment(deflection_deg, x_hinge, thrust_n, v_inf, motor_y,
     return q * (elevon_chord ** 2) * elevon_span * jnp.abs(ch)
 
 
-def servo_force(hinge_moment_nm):
+def servo_force(hinge_moment_nm, advantage):
     """Servo force needed to hold a hinge moment, in N.
 
     Virtual work through the linkage: the servo pushes F along its rail while
     the elevon absorbs tau at the hinge, so F = tau / (dx/dtheta) and the
     denominator is exactly the mechanical advantage the linkage model reports.
 
+    ``advantage`` is a design output rather than a constant -- it comes from the
+    linkage geometry, which the optimizer chooses -- so it is passed in.  See
+    airfoil.linkage_coupling for the units and for why it is no longer pasted
+    in from a separate optimization.
+
     This is the term that punishes an oversized elevon.  Authority grows about
     linearly with elevon chord while hinge moment grows with its square, so past
     some size the servo saturates and further chord buys deflection the servo
     cannot hold -- which is to say, no authority at all.
     """
-    return hinge_moment_nm / jnp.maximum(LINKAGE_ADVANTAGE, 1e-9)
+    return hinge_moment_nm / jnp.maximum(advantage, 1e-9)
 
 
 # --- Geometry and mass --------------------------------------------------------
@@ -684,10 +681,10 @@ def hinge_fraction_at(chord, x_hinge, mac):
     return 1.0 - elevon_chord_at(chord, x_hinge, mac) / jnp.maximum(chord, 1e-9)
 
 
-def servo_slack(chord, thickness, servo_station, x_hinge):
+def servo_slack(chord, thickness, servo_chord_frac, x_hinge):
     """Room around the servo at its chordwise station, in m.
 
-    ``servo_station`` is the chord fraction where the servo body is centred, and
+    ``servo_chord_frac`` is the chord fraction where the servo body is centred, and
     ``chord``/``thickness`` are the section it sits in -- which is its own
     spanwise station, not the root.  Positive return means it fits.
 
@@ -701,23 +698,23 @@ def servo_slack(chord, thickness, servo_station, x_hinge):
     cost belongs to the linkage model, not here.  What this function reports is
     the packaging half of the trade.
     """
-    depth_slack = thickness_at(servo_station, thickness) - SERVO_DEPTH
+    depth_slack = thickness_at(servo_chord_frac, thickness) - SERVO_DEPTH
 
     # The servo body occupies chord centred on its station; the hinge must be
     # far enough aft that the body does not run into it.
-    body_aft_edge = servo_station + 0.5 * SERVO_LENGTH / chord
+    body_aft_edge = servo_chord_frac + 0.5 * SERVO_LENGTH / chord
     clearance_slack = (x_hinge - body_aft_edge) * chord
 
     return jnp.minimum(depth_slack, clearance_slack)
 
 
-def pushrod_length(chord, servo_station, x_hinge):
+def pushrod_length(chord, servo_chord_frac, x_hinge):
     """Chordwise distance from the servo output to the hinge line, in m.
 
     The quantity the linkage model needs: a longer run means the horn is driven
     further off-axis, so mechanical advantage varies more across the stroke.
     """
-    return (x_hinge - servo_station) * chord
+    return (x_hinge - servo_chord_frac) * chord
 
 
 def battery_slack(root_chord, root_thickness, battery_station):
@@ -745,7 +742,7 @@ def battery_slack(root_chord, root_thickness, battery_station):
 
 
 def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
-                 servo_station, servo_span_fraction, x_hinge, battery_station):
+                 servo_chord_frac, servo_span_fraction, x_hinge, battery_station):
     """How much room the wing has beyond what it must hold, in m.
 
     Positive means everything fits.  The battery and the servos are checked at
@@ -765,7 +762,7 @@ def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
     # fraction is not x_hinge once the elevon is constant-chord.
     _, mac = planform(root_chord, tip_chord)
     x_hinge_local = hinge_fraction_at(chord, x_hinge, mac)
-    servo = servo_slack(chord, thickness, servo_station, x_hinge_local)
+    servo = servo_slack(chord, thickness, servo_chord_frac, x_hinge_local)
 
     # The servo must sit outboard of the battery, which occupies the centre
     # section out to roughly half its own width either side of the centreline.
@@ -842,39 +839,90 @@ def angular_acceleration(moment, inertia_value):
 
 
 DESIGN_VARS = ["root_chord", "tip_chord", "root_thickness", "tip_thickness",
-               "x_hinge", "elevon_inboard_frac", "motor_frac", "servo_station",
-               "servo_span_frac", "le_sweep_deg", "battery_station"]
+               "x_hinge", "elevon_inboard_frac", "motor_frac", "servo_chord_frac",
+               "servo_span_frac", "le_sweep_deg", "battery_station",
+               # Linkage geometry, in millimetres.  See airfoil.linkage_coupling
+               # for why these live in the same vector as the wing: the servo's
+               # stroke is a fixed budget spent on torque or throw, and only the
+               # coupled problem knows which side to be on.
+               #
+               # Two things are absent deliberately.  servo_x is the pushrod run,
+               # which the wing geometry already determines.  The control rod
+               # length is solved for rather than chosen, because it is what sets
+               # the throw symmetric about zero -- see linkage_model._solve_rod_length.
+               "servo_height", "servo_rod_dy", "servo_travel_mm",
+               "flap_x_mm", "flap_y_mm"]
 
 
 def unpack(p):
-    """Design vector to named geometry, with span fractions turned into metres."""
-    (root_chord, tip_chord, root_t, tip_t, x_hinge, elevon_in_f, motor_f,
-     servo_station, servo_span_f, le_sweep_deg, battery_station) = p
+    """Design vector to named geometry, with span fractions turned into metres.
+
+    Indexed by name rather than destructured positionally, so that adding a
+    design variable is a one-line change to DESIGN_VARS instead of a silent
+    mis-assignment of every variable after the insertion point.
+    """
+    v = {name: p[i] for i, name in enumerate(DESIGN_VARS)}
     semi = 0.5 * SPAN
+    servo_span_f = v["servo_span_frac"]
     servo_chord, servo_thickness = local_geometry(
-        root_chord, tip_chord, root_t, tip_t, servo_span_f)
+        v["root_chord"], v["tip_chord"], v["root_thickness"],
+        v["tip_thickness"], servo_span_f)
     return {
-        "root_chord": root_chord,
-        "tip_chord": tip_chord,
-        "root_thickness": root_t,
-        "tip_thickness": tip_t,
-        "x_hinge": x_hinge,
-        "elevon_inboard_y": elevon_in_f * semi,
+        "root_chord": v["root_chord"],
+        "tip_chord": v["tip_chord"],
+        "root_thickness": v["root_thickness"],
+        "tip_thickness": v["tip_thickness"],
+        "x_hinge": v["x_hinge"],
+        "elevon_inboard_y": v["elevon_inboard_frac"] * semi,
         # The elevon stops short of the tip so the hinge has structure to anchor
         # into at its outboard end instead of ending in mid-air.
         "elevon_outboard_y": semi - ELEVON_TIP_MARGIN,
-        "motor_y": motor_f * semi,
-        "servo_station": servo_station,
-        "battery_station": battery_station,
+        "motor_y": v["motor_frac"] * semi,
+        "servo_chord_frac": v["servo_chord_frac"],
+        "battery_station": v["battery_station"],
         "servo_span_frac": servo_span_f,
         "servo_y": servo_span_f * semi,
         "servo_chord": servo_chord,
         "servo_thickness": servo_thickness,
-        "le_sweep_deg": le_sweep_deg,
+        "le_sweep_deg": v["le_sweep_deg"],
+        # Linkage, millimetres, passed through untouched.  servo_height is the
+        # rail's offset perpendicular to the hinge axis, which is a different
+        # axis from servo_y above -- see airfoil.linkage_coupling.
+        "servo_height": v["servo_height"],
+        "servo_rod_dy": v["servo_rod_dy"],
+        # Where the control rod actually attaches on the servo end, which is the
+        # linkage model's servo_y.  The servo body sits at servo_height; the rod
+        # picks up at an offset from it, so the two are separate quantities tied
+        # together rather than one number doing both jobs.
+        "servo_rod_y": v["servo_height"] + v["servo_rod_dy"],
+        "servo_travel_mm": v["servo_travel_mm"],
+        "flap_x_mm": v["flap_x_mm"],
+        "flap_y_mm": v["flap_y_mm"],
     }
 
 
-def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
+def required_deflection_deg(unit_alpha, floor):
+    """Deflection needed to reach an angular acceleration floor, in degrees.
+
+    A division rather than a root find, because authority is *exactly* linear in
+    deflection below FLAP_STALL_DEG: flap_deflection_efficiency is identically
+    one there, so the moment is proportional to the deflection and
+    ``unit_alpha`` -- the acceleration at one degree -- is the whole slope.
+
+    That linearity is load-bearing.  If flap_deflection_efficiency is ever
+    changed to roll off gradually from zero deflection instead of staying flat
+    to FLAP_STALL_DEG, this inversion silently under-predicts and has to become
+    a real solve.  There is a test pinning the flat region for that reason.
+
+    Above the peak the curve turns over -- more deflection buys *less*
+    authority -- so a result past FLAP_STALL_DEG does not mean "deflect harder",
+    it means the surface is too small at any deflection.  Returned unclamped so
+    the deflection_reachable constraint can report that honestly.
+    """
+    return floor / jnp.maximum(jnp.abs(unit_alpha), 1e-9)
+
+
+def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
     """Everything the elevon sizing decision needs, at one design point.
 
     Authority is reported at four conditions because the binding one is not
@@ -882,6 +930,13 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
     fed almost entirely by prop wash; idle descent is the case where the wash
     goes away while the aircraft still needs to be controllable, which is the
     condition most likely to be missed.
+
+    ``deflection_deg`` of None -- the default -- means derive it, which is the
+    design intent: the deflection the aircraft flies at is a consequence of the
+    authority floors and of what the linkage can deliver, not a number chosen up
+    front.  An explicit value is still honoured, because the plots and the
+    roll-off table need to ask what would happen at a deflection this design
+    does not actually use.
     """
     g = unpack(p)
     area, mac = planform(g["root_chord"], g["tip_chord"])
@@ -910,19 +965,71 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
     throttles = {"hover": 1.0 / jnp.maximum(thrust_to_weight(mass), 1e-9),
                  "transition": 0.8, "cruise": 0.3, "idle_descent": 0.05}
 
+    # The pushrod run, which is the linkage model's servo_x.  Measured against
+    # the hinge fraction at the servo's *own* section rather than at the MAC,
+    # because that is the section the pushrod physically lies in.
+    pushrod = pushrod_length(
+        g["servo_chord"], g["servo_chord_frac"],
+        hinge_fraction_at(g["servo_chord"], g["x_hinge"], mac))
+
+    lk = linkage_coupling.linkage_metrics(
+        pushrod, g["servo_rod_y"], g["servo_travel_mm"],
+        g["flap_x_mm"], g["flap_y_mm"])
+    advantage = lk["advantage"]
+
+    def moments(cond, thrust, v, delta_deg):
+        """Control moments at one condition and deflection."""
+        return (
+            pitch_moment(delta_deg, g["x_hinge"], thrust, v, g["motor_y"],
+                         g["elevon_inboard_y"], g["elevon_outboard_y"],
+                         area, mac),
+            roll_moment(delta_deg, g["x_hinge"], thrust, v, g["motor_y"],
+                        g["elevon_inboard_y"], g["elevon_outboard_y"], mac),
+            yaw_moment(available_differential_thrust(throttles[cond]),
+                       g["motor_y"]),
+            hinge_moment(delta_deg, g["x_hinge"], thrust, v, g["motor_y"],
+                         g["elevon_inboard_y"], g["elevon_outboard_y"], mac),
+        )
+
+    # --- Derive the deflection, unless one was asked for explicitly.
+    #
+    # Hover sets the requirement: it is the condition with the least dynamic
+    # pressure that still has to hold the aircraft up.  Evaluating at one degree
+    # gives the slope directly, which is all the inversion needs.
+    v_hov, thrust_hov = conditions["hover"]
+    unit_pitch, unit_roll, _, unit_hinge = moments("hover", thrust_hov, v_hov, 1.0)
+    delta_req = jnp.maximum(
+        required_deflection_deg(angular_acceleration(unit_pitch, i_pitch),
+                                MIN_ALPHA_PITCH_HOVER),
+        required_deflection_deg(angular_acceleration(unit_roll, i_roll),
+                                MIN_ALPHA_ROLL_HOVER))
+
+    # What the mechanism can actually deliver, whichever of the two limits is
+    # tighter.  Both are divisions for the same reason delta_req is: the hinge
+    # moment is linear in deflection, so the deflection at which the servo
+    # stalls is just the force limit scaled by the force at one degree.
+    force_limit = SERVO_MAX_FORCE / SERVO_FORCE_MARGIN
+    unit_force = servo_force(unit_hinge, advantage)
+    # Worst case across conditions, not hover: hover has no freestream, so it is
+    # not where the hinge moment peaks.  Scale by the ratio of peak dynamic
+    # pressure to hover's, which is exactly how the hinge moment scales.
+    q_hover = elevon_dynamic_pressure(
+        thrust_hov, v_hov, g["motor_y"],
+        g["elevon_inboard_y"], g["elevon_outboard_y"])
+    q_peak = functools.reduce(jnp.maximum, [
+        elevon_dynamic_pressure(thrust, v, g["motor_y"],
+                                g["elevon_inboard_y"], g["elevon_outboard_y"])
+        for v, thrust in conditions.values()])
+    unit_force_peak = unit_force * q_peak / jnp.maximum(q_hover, 1e-12)
+    delta_force = force_limit / jnp.maximum(unit_force_peak, 1e-12)
+    delta_max = jnp.minimum(lk["delta_max_deg"], delta_force)
+
+    if deflection_deg is None:
+        deflection_deg = delta_req
+
     authority = {}
     for name, (v, thrust) in conditions.items():
-        m_pitch = pitch_moment(
-            deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
-            g["elevon_inboard_y"], g["elevon_outboard_y"], area, mac)
-        m_roll = roll_moment(
-            deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
-            g["elevon_inboard_y"], g["elevon_outboard_y"], mac)
-        m_yaw = yaw_moment(
-            available_differential_thrust(throttles[name]), g["motor_y"])
-        m_hinge = hinge_moment(
-            deflection_deg, g["x_hinge"], thrust, v, g["motor_y"],
-            g["elevon_inboard_y"], g["elevon_outboard_y"], mac)
+        m_pitch, m_roll, m_yaw, m_hinge = moments(name, thrust, v, deflection_deg)
         authority[name] = {
             "q": elevon_dynamic_pressure(
                 thrust, v, g["motor_y"],
@@ -931,7 +1038,7 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
             "roll": m_roll,
             "yaw": m_yaw,
             "hinge": m_hinge,
-            "servo_force": servo_force(m_hinge),
+            "servo_force": servo_force(m_hinge, advantage),
             # Angular accelerations, which is what "enough authority" means.
             "alpha_pitch": angular_acceleration(m_pitch, i_pitch),
             "alpha_roll": angular_acceleration(m_roll, i_roll),
@@ -950,7 +1057,25 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "mac": mac,
         "aspect_ratio": SPAN ** 2 / jnp.maximum(area, 1e-9),
         "peak_servo_force": peak_servo_force,
-        "servo_force_limit": SERVO_MAX_FORCE / SERVO_FORCE_MARGIN,
+        "servo_force_limit": force_limit,
+        # Deflection, derived.  delta_req is what the authority floors demand,
+        # delta_max what the mechanism can give, and the gap between them is the
+        # margin the design is carrying.
+        "deflection_deg": deflection_deg,
+        "delta_req": delta_req,
+        "delta_max": delta_max,
+        "delta_geom": lk["delta_max_deg"],
+        "delta_force": delta_force,
+        "delta_req_pitch": required_deflection_deg(
+            angular_acceleration(unit_pitch, i_pitch), MIN_ALPHA_PITCH_HOVER),
+        "delta_req_roll": required_deflection_deg(
+            angular_acceleration(unit_roll, i_roll), MIN_ALPHA_ROLL_HOVER),
+        # Linkage.
+        "linkage_advantage": advantage,
+        "linkage_rod_length": lk["rod_length"],
+        "linkage_violation": lk["violation"],
+        "linkage_valid_fraction": lk["valid_fraction"],
+        "linkage_deadness": lk["deadness"],
         "mass": mass,
         "twr": thrust_to_weight(mass),
         "wing_loading": mass * G / jnp.maximum(area, 1e-9),
@@ -962,10 +1087,10 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "volume_slack": volume_slack(
             g["root_chord"], g["tip_chord"],
             g["root_thickness"], g["tip_thickness"],
-            g["servo_station"], g["servo_span_frac"], g["x_hinge"],
+            g["servo_chord_frac"], g["servo_span_frac"], g["x_hinge"],
             g["battery_station"]),
         "servo_depth_available": thickness_at(
-            g["servo_station"], g["servo_thickness"]),
+            g["servo_chord_frac"], g["servo_thickness"]),
         # Depth at the shallower of the battery's two ends, which is the one
         # that decides whether it fits.
         "battery_depth_available": jnp.minimum(
@@ -981,7 +1106,7 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         # outboard of that in shorter chord where the hinge lies a larger
         # fraction aft.  Using x_hinge there overstates the run.
         "pushrod_length": pushrod_length(
-            g["servo_chord"], g["servo_station"],
+            g["servo_chord"], g["servo_chord_frac"],
             hinge_fraction_at(g["servo_chord"], g["x_hinge"], mac)),
         "yaw_moment": yaw_moment(0.5 * thrust_hover, g["motor_y"]),
         "wash_fraction": washed_span_fraction(
@@ -1124,20 +1249,41 @@ def _excess(value, ceiling):
     return jnp.maximum(0.0, value - ceiling) / jnp.maximum(jnp.abs(ceiling), 1e-9)
 
 
-def constraints(p, cl_max=0.8, deflection_deg=10.0):
+def constraints(p, cl_max=0.8, deflection_deg=None):
     """Each constraint's fractional shortfall.  All zero means feasible."""
     g = unpack(p)
     r = evaluate(p, cl_max=cl_max, deflection_deg=deflection_deg)
-    hover = r["authority"]["hover"]
     cruise = r["authority"]["cruise"]
 
     return {
-        "alpha_pitch_hover": _shortfall(
-            jnp.abs(hover["alpha_pitch"]), MIN_ALPHA_PITCH_HOVER),
-        "alpha_roll_hover": _shortfall(
-            jnp.abs(hover["alpha_roll"]), MIN_ALPHA_ROLL_HOVER),
+        # Hover pitch and roll authority are not checked at an assumed
+        # deflection any more.  The floors are inverted for the deflection they
+        # need and the mechanism is asked whether it can reach it, which is the
+        # same requirement stated in terms of something the design controls.
+        "deflection_authority": _shortfall(r["delta_max"], r["delta_req"]),
+        # The required deflection has to land below the authority peak.  Past
+        # FLAP_STALL_DEG a larger deflection buys *less* authority, so a
+        # requirement beyond it cannot be met by deflecting harder -- the
+        # surface itself is too small.
+        "deflection_reachable": _excess(r["delta_req"], FLAP_STALL_DEG),
+        # Yaw comes from differential thrust alone and does not depend on
+        # deflection at all, so it stays a plain floor.
         "alpha_yaw_cruise": _shortfall(
             jnp.abs(cruise["alpha_yaw"]), MIN_ALPHA_YAW_CRUISE),
+        # The linkage has to close, and has to keep moving through its whole
+        # stroke.  Both matter because an unclosable or dead linkage reports a
+        # *larger* mechanical advantage, so without these the optimizer is
+        # actively rewarded for choosing mechanisms that cannot be built.
+        "linkage_closes": r["linkage_violation"],
+        "linkage_valid": _shortfall(r["linkage_valid_fraction"], 1.0),
+        "linkage_dead": r["linkage_deadness"],
+        # The servo rail sits inside the wing, so its offset from the hinge axis
+        # is capped by the section depth there.  The horn is deliberately not
+        # checked against this: it is a control horn, and standing proud of the
+        # surface is what control horns do.
+        "servo_rail_depth": _excess(
+            g["servo_height"] / linkage_coupling.MM_PER_M,
+            0.5 * r["servo_depth_available"]),
         "twr": _shortfall(r["twr"], MIN_TWR),
         "re_tip": _shortfall(r["re_tip"], MIN_RE_TIP),
         "aspect_ratio": _shortfall(r["aspect_ratio"], MIN_ASPECT_RATIO),
@@ -1177,7 +1323,7 @@ def constraints(p, cl_max=0.8, deflection_deg=10.0):
     }
 
 
-def cost(p, cl_max=0.8, deflection_deg=10.0):
+def cost(p, cl_max=0.8, deflection_deg=None):
     """Stall speed plus penalties for violated constraints.
 
     A penalty method rather than a projection: the constraints couple through
@@ -1209,7 +1355,7 @@ def stall_only(p, cl_max=0.8):
     return evaluate(p, cl_max=cl_max)["v_stall"]
 
 
-def active_constraints(p, cl_max=0.8, deflection_deg=10.0, tol=1e-3):
+def active_constraints(p, cl_max=0.8, deflection_deg=None, tol=1e-3):
     """Constraints sitting at their limit rather than comfortably satisfied.
 
     A penalty method never drives a shortfall to exactly zero -- it settles
@@ -1222,7 +1368,7 @@ def active_constraints(p, cl_max=0.8, deflection_deg=10.0, tol=1e-3):
             if float(value) > tol * tol]
 
 
-def sensitivity(p, bounds, cl_max=0.8, deflection_deg=10.0):
+def sensitivity(p, bounds, cl_max=0.8, deflection_deg=None):
     """Per-variable gradients and bound status at a design point.
 
     Two gradients are reported because they answer different questions.
@@ -1298,16 +1444,23 @@ BASELINE = jnp.array([
     0.75,    # x_hinge  (25% chord elevon, where dCm/deta peaks)
     0.30,    # elevon_inboard_frac
     0.47,    # motor_frac
-    0.45,    # servo_station, chord fraction where the servo body sits
+    0.45,    # servo_chord_frac, chord fraction where the servo body sits
     0.40,    # servo_span_frac, outboard of the battery, near its elevon
     20.0,    # le_sweep_deg, aft.  Enough to pull the quarter chord back to
              # roughly neutral against this taper; there is no stability model
              # here to choose it properly.
     BATTERY_STATION_DEFAULT,   # battery_station, chord fraction of its nose
+    # Linkage, mm.  Taken from the sliders the interactive linkage tool was
+    # left on, except servo_x, which is now derived from the wing geometry.
+    3.55,    # servo_height, servo body depth off the hinge axis
+    0.0,     # servo_rod_dy, rod pickup offset from the body
+    9.0,     # servo_travel_mm, the servo's stroke
+    0.0,     # flap_x_mm, horn offset along the flap
+    10.0,    # flap_y_mm, horn radius.  8.19 mm advantage at +/-26.7 deg.
 ])
 
 
-def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
+def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
     """Print a readable summary of one design point."""
     p = BASELINE if p is None else p
     g = unpack(p)
@@ -1360,7 +1513,7 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         # constraint does not agree with, which is worse than not printing it.
         "servo/hinge clearance": (
             float(hinge_fraction_at(sc, float(g["x_hinge"]), float(r["mac"])))
-            - float(g["servo_station"]) - 0.5 * SERVO_LENGTH / sc) * sc,
+            - float(g["servo_chord_frac"]) - 0.5 * SERVO_LENGTH / sc) * sc,
         "servo outboard of battery": (
             float(g["servo_y"]) - 0.5 * SERVO_WIDTH),
         "motor wiring reach": MAX_MOTOR_Y - float(g["motor_y"]),
@@ -1377,7 +1530,7 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
     for name, value in terms.items():
         mark = "  <-- binding" if name == binding else ""
         print(f"    {name:<26}{value * 1e3:+7.1f} mm{mark}")
-    print(f"    servo at {float(g['servo_station']) * 100:.0f}% chord,"
+    print(f"    servo at {float(g['servo_chord_frac']) * 100:.0f}% chord,"
           f" {float(g['servo_span_frac']) * 100:.0f}% semi-span"
           f" ({sc * 1e3:.0f} mm local chord),"
           f" pushrod {float(r['pushrod_length']) * 1e3:.1f} mm")
@@ -1404,7 +1557,44 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
     print(f"  yaw moment      {float(r['yaw_moment']) * 1e3:8.2f} mN.m"
           f"   at 50% differential thrust")
 
-    print(f"\n=== Control authority at {deflection_deg:.0f} deg deflection ===")
+    delta = float(r["deflection_deg"])
+    d_req, d_max = float(r["delta_req"]), float(r["delta_max"])
+    d_geom, d_force = float(r["delta_geom"]), float(r["delta_force"])
+
+    print("\n=== Linkage and deflection ===")
+    print(f"  pushrod run     {float(r['pushrod_length']) * 1e3:8.1f} mm"
+          f"   (the linkage model's servo_x, derived from the wing)")
+    print(f"  horn radius     {float(g['flap_y_mm']):8.2f} mm"
+          f"   offset {float(g['flap_x_mm']):+.2f} mm")
+    print(f"  servo body      {float(g['servo_height']):8.2f} mm"
+          f"   off the hinge axis, stroke {float(g['servo_travel_mm']):.1f} mm")
+    print(f"  rod pickup      {float(g['servo_rod_y']):8.2f} mm"
+          f"   ({float(g['servo_rod_dy']):+.2f} mm from the body)")
+    print(f"  rod length      {float(r['linkage_rod_length']) * 1e3:8.1f} mm")
+    print(f"  advantage       {float(r['linkage_advantage']) * 1e3:8.2f} mm"
+          f"   worst case over the stroke")
+    print(f"  validity        violation {float(r['linkage_violation']):.3g},"
+          f" valid {float(r['linkage_valid_fraction']):.3f},"
+          f" deadness {float(r['linkage_deadness']):.3g}")
+
+    binds = "geometry" if d_geom <= d_force else "servo force"
+    print(f"\n  throw          +/-{d_geom:6.1f} deg   geometric")
+    print(f"  stall at        {d_force:8.1f} deg   where the servo gives out")
+    print(f"  delta_max       {d_max:8.1f} deg   <-- {binds} binds")
+
+    dp, dr = float(r["delta_req_pitch"]), float(r["delta_req_roll"])
+    print("\n  required deflection")
+    print(f"    pitch hover   {dp:8.2f} deg"
+          f"{'   <-- binding' if dp >= dr else ''}")
+    print(f"    roll hover    {dr:8.2f} deg"
+          f"{'   <-- binding' if dr > dp else ''}")
+    print(f"  delta_req       {d_req:8.2f} deg")
+    print(f"  margin          {d_max / max(d_req, 1e-9):8.1f}x"
+          f"   {'OK' if d_max >= d_req else 'CANNOT REACH'}")
+    print(f"  headroom        {FLAP_STALL_DEG - d_req:8.2f} deg"
+          f"   before the authority peak at {FLAP_STALL_DEG:.0f} deg")
+
+    print(f"\n=== Control authority at {delta:.2f} deg deflection (derived) ===")
     print(f"  {'condition':<14}{'q [Pa]':>9}{'pitch':>10}{'roll':>10}"
           f"{'hinge':>10}   (mN.m)")
     for name, a in r["authority"].items():
@@ -1418,8 +1608,8 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
 
     f_peak = float(r["peak_servo_force"])
     f_limit = float(r["servo_force_limit"])
-    print(f"  through a {LINKAGE_ADVANTAGE * 1e3:.2f} mm linkage advantage"
-          f" that is {f_peak:.2f} N at the servo,")
+    print(f"  through a {float(r['linkage_advantage']) * 1e3:.2f} mm advantage"
+          f" that is {f_peak:.3f} N at the servo,")
     print(f"  against {f_limit:.2f} N available"
           f" ({SERVO_MAX_FORCE:.1f} N stall / {SERVO_FORCE_MARGIN:.1f} margin)"
           f"   {'OK' if f_peak <= f_limit else 'SERVO STALLS'}"
