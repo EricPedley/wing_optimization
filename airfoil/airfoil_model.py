@@ -1073,6 +1073,88 @@ cost_jit = jax.jit(cost)
 constraints_jit = jax.jit(constraints)
 
 
+def stall_only(p, cl_max=0.8):
+    """The objective without any penalty, for sensitivity reporting."""
+    return evaluate(p, cl_max=cl_max)["v_stall"]
+
+
+def active_constraints(p, cl_max=0.8, deflection_deg=10.0, tol=1e-3):
+    """Constraints sitting at their limit rather than comfortably satisfied.
+
+    A penalty method never drives a shortfall to exactly zero -- it settles
+    where the penalty gradient balances the objective's -- so "active" means
+    within a small tolerance of the boundary, including slightly past it.
+    """
+    return [name
+            for name, value in constraints(
+                p, cl_max=cl_max, deflection_deg=deflection_deg).items()
+            if float(value) > tol * tol]
+
+
+def sensitivity(p, bounds, cl_max=0.8, deflection_deg=10.0):
+    """Per-variable gradients and bound status at a design point.
+
+    Two gradients are reported because they answer different questions.
+    d(stall)/dx is what the variable is actually worth: how much stall speed it
+    would buy if nothing else pushed back.  d(cost)/dx is what the optimizer
+    felt, penalties included, and near a boundary it is dominated by whichever
+    constraint is active rather than by the objective.
+
+    A variable with a near-zero d(stall)/dx is invisible to the objective, and
+    whatever value it holds was decided by a constraint, a tie-break, or the
+    starting scatter -- not by optimization.  That distinction is the whole
+    point of the table.
+    """
+    p = jnp.asarray(p)
+    d_stall = jax.grad(lambda q: stall_only(q, cl_max=cl_max))(p)
+    d_cost = jax.grad(lambda q: cost(q, cl_max=cl_max,
+                                     deflection_deg=deflection_deg))(p)
+
+    # Which constraints are active, i.e. sitting at zero slack rather than
+    # comfortably satisfied.  A variable pinned by one of these is just as
+    # constrained as one sitting on a box bound, but nothing about its value
+    # shows that, so the two are reported together.
+    active = active_constraints(p, cl_max=cl_max,
+                                deflection_deg=deflection_deg)
+
+    # Which active constraint each variable actually moves.  Taking the
+    # gradient of every constraint with respect to every variable is what
+    # distinguishes "this variable is pinned by the tip Reynolds floor" from
+    # "some unrelated constraint happens to be active".
+    def constraint_vector(q):
+        return jnp.stack([v for v in constraints(
+            q, cl_max=cl_max, deflection_deg=deflection_deg).values()])
+
+    names = list(constraints(p, cl_max=cl_max,
+                             deflection_deg=deflection_deg).keys())
+    jac = jax.jacobian(constraint_vector)(p)
+
+    rows = []
+    for i, name in enumerate(DESIGN_VARS):
+        lo, hi = bounds[name]
+        value = float(p[i])
+        span = max(hi - lo, 1e-12)
+        # Proximity as a fraction of the box, so "at a bound" means the same
+        # thing for a chord in metres and a sweep angle in degrees.
+        at_lower = (value - lo) / span < 1e-3
+        at_upper = (hi - value) / span < 1e-3
+
+        pinned = [names[k] for k in range(len(names))
+                  if names[k] in active and abs(float(jac[k, i])) > 1e-9]
+
+        rows.append({
+            "name": name,
+            "value": value,
+            "lower": lo,
+            "upper": hi,
+            "d_stall": float(d_stall[i]),
+            "d_cost": float(d_cost[i]),
+            "at_bound": "lower" if at_lower else ("upper" if at_upper else ""),
+            "pinned_by": pinned,
+        })
+    return rows
+
+
 # Current best guess at the configuration, in DESIGN_VARS order.  Root chord is
 # above the 65 mm the battery alone would need, mostly to keep the thickness
 # ratio sane at this Reynolds number once the section is deep enough to hold

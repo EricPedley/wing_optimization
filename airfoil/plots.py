@@ -24,6 +24,7 @@ one has been cached and to the hand-picked baseline otherwise.
 """
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
@@ -453,6 +454,100 @@ def dashboard(p=None, label=None):
     return combined
 
 
+# Units and scaling for the sensitivity table, so a chord in metres and a sweep
+# in degrees can be read side by side.  The factor converts the stored value to
+# the displayed unit; the gradient is divided by it so it stays "per displayed
+# unit" and the numbers are comparable.
+_VAR_UNITS = {
+    "root_chord": ("mm", 1e3),
+    "tip_chord": ("mm", 1e3),
+    "root_thickness": ("mm", 1e3),
+    "tip_thickness": ("mm", 1e3),
+    "x_hinge": ("% chord", 1e2),
+    "elevon_inboard_frac": ("% semi", 1e2),
+    "motor_frac": ("% semi", 1e2),
+    "servo_station": ("% chord", 1e2),
+    "servo_span_frac": ("% semi", 1e2),
+    "le_sweep_deg": ("deg", 1.0),
+    "battery_station": ("% chord", 1e2),
+}
+
+
+def sensitivity_table_html(p=None):
+    """Design variables with their sensitivities and what pins them.
+
+    The point of the table is to separate results from artifacts.  A variable
+    with a real gradient and no active constraint was genuinely optimized; one
+    sitting on a bound was decided by that bound; and one with a vanishing
+    gradient was not decided by the objective at all, whatever value it shows.
+    """
+    p = default_design() if p is None else p
+    rows = am.sensitivity(p, opt.BOUNDS)
+
+    # Scale of the largest sensitivity, used to flag the ones small enough that
+    # the objective is effectively blind to them.
+    biggest = max(abs(r["d_stall"]) for r in rows) or 1.0
+
+    out = [
+        "<style>",
+        "  .sens { border-collapse: collapse; font-family: system-ui, sans-serif;",
+        "          font-size: 13px; margin: 24px auto; max-width: 1100px; }",
+        "  .sens th, .sens td { border: 1px solid #ccc; padding: 6px 10px;",
+        "                       text-align: right; }",
+        "  .sens th { background: #f0f0f0; text-align: center; }",
+        "  .sens td.name { text-align: left; font-family: monospace; }",
+        "  .sens td.note { text-align: left; color: #555; font-size: 12px; }",
+        "  .sens tr.blind { background: #fff4f4; }",
+        "  .sens tr.bound { background: #f4f8ff; }",
+        "  .sens caption { font-family: system-ui, sans-serif; font-size: 14px;",
+        "                  padding: 10px; text-align: left; max-width: 1100px; }",
+        "</style>",
+        '<table class="sens">',
+        "<caption><b>Design variables at the optimum.</b> "
+        "d(stall)/dx is what the variable is worth on its own; "
+        "d(cost)/dx includes constraint penalties and is what the optimizer "
+        "actually followed. A variable is only a genuine result if it has a "
+        "real gradient and nothing pinning it &mdash; rows shaded red are "
+        "invisible to the objective, rows shaded blue sit on a bound."
+        "</caption>",
+        "<tr><th>variable</th><th>value</th><th>bounds</th>"
+        "<th>d(stall)/dx<br>m/s per unit</th><th>d(cost)/dx</th>"
+        "<th>at bound</th><th>pinned by</th></tr>",
+    ]
+
+    for r in rows:
+        unit, scale = _VAR_UNITS.get(r["name"], ("", 1.0))
+        blind = abs(r["d_stall"]) < 1e-6 * biggest
+        cls = "blind" if blind else ("bound" if r["at_bound"] or r["pinned_by"]
+                                     else "")
+        note = ", ".join(r["pinned_by"]) if r["pinned_by"] else ""
+        if blind and not note:
+            note = "objective is flat in this variable"
+
+        out.append(
+            f'<tr class="{cls}">'
+            f'<td class="name">{r["name"]}</td>'
+            f'<td>{r["value"] * scale:.2f} {unit}</td>'
+            f'<td>{r["lower"] * scale:.1f} &ndash; {r["upper"] * scale:.1f}</td>'
+            f'<td>{r["d_stall"] / scale:+.3e}</td>'
+            f'<td>{r["d_cost"] / scale:+.3e}</td>'
+            f'<td>{r["at_bound"] or "&mdash;"}</td>'
+            f'<td class="note">{note or "&mdash;"}</td>'
+            "</tr>"
+        )
+
+    out.append("</table>")
+
+    active = am.active_constraints(p)
+    out.append(
+        '<p style="font-family: system-ui, sans-serif; font-size: 13px;'
+        ' max-width: 1100px; margin: 0 auto 32px;">'
+        f'<b>Active constraints:</b> {", ".join(active) if active else "none"}.'
+        "</p>"
+    )
+    return "\n".join(out)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", action="store_true",
@@ -478,7 +573,13 @@ def main():
         else:
             p, label = x, "optimized"
 
-    dashboard(p, label=label).write_html(args.out, include_plotlyjs="cdn")
+    # The table is appended as plain HTML rather than built as a Plotly table,
+    # so it can carry its own styling and wrap the explanatory caption.
+    html = dashboard(p, label=label).to_html(include_plotlyjs="cdn",
+                                             full_html=True)
+    table = sensitivity_table_html(p)
+    html = html.replace("</body>", f"{table}\n</body>")
+    Path(args.out).write_text(html)
     print(f"wrote {args.out}  ({label})")
 
 
