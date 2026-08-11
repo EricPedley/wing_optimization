@@ -371,6 +371,13 @@ def yaw_moment(differential_thrust_n, motor_y):
     The only yaw control on the aircraft -- there is no rudder -- so the motor
     spanwise position is what sets yaw authority, and it trades directly against
     the wash coverage and roll inertia that the same variable controls.
+
+    Note the objective cannot currently see any of that.  Every authority floor
+    is met with a wide margin at every reachable motor position, and stall speed
+    does not depend on where the motors sit, so the cost is flat in motor_frac
+    and the optimizer leaves it wherever it started.  Motor position is chosen
+    by :data:`MOTOR_FRAC_PREFERENCE` below rather than optimized; the sweep in
+    ``sweep.py`` is what shows the tradeoff.
     """
     return differential_thrust_n * motor_y
 
@@ -608,19 +615,24 @@ def pushrod_length(chord, servo_station, x_hinge):
 def battery_slack(root_chord, root_thickness, battery_station):
     """Room around the battery at its chordwise station, in m.
 
-    Two checks, and they pull in opposite directions along the chord.  The
-    battery must fit between its station and the trailing edge, which wants it
-    forward; and the section must be deep enough for it at its *shallowest*
-    point, which is its forward face, and that wants it aft.
+    Two checks.  The battery must fit between its station and the trailing edge,
+    which wants it forward; and the section must be deep enough for it over its
+    whole length, which wants it centred on the thickest part.
 
-    Depth is evaluated at the forward face rather than the centre because the
-    nose is where the section runs out of room: with a realistic sqrt(x) nose a
-    battery at 5% chord sits under noticeably less depth than one at 15%, and
-    checking the middle of the box would miss that entirely.
+    Depth is checked at both faces rather than at one, because which face is
+    tighter depends on where the box lands: forward of maximum thickness the
+    nose is the problem, aft of it the tail is.  Checking only one face lets the
+    optimizer slide the battery past the crest and clip the shell at the other
+    end, which is exactly what happened when only the forward face was tested.
+    The section is single-peaked, so the minimum over the box is always at one
+    end or the other and the two samples are enough.
     """
     length_slack = (1.0 - battery_station) * root_chord - BATTERY_LENGTH
-    depth_slack = (thickness_at(battery_station, root_thickness)
-                   - BATTERY_THICKNESS)
+    aft_station = battery_station + BATTERY_LENGTH / jnp.maximum(root_chord, 1e-9)
+    depth_slack = jnp.minimum(
+        thickness_at(battery_station, root_thickness),
+        thickness_at(aft_station, root_thickness),
+    ) - BATTERY_THICKNESS
     return jnp.minimum(length_slack, depth_slack)
 
 
@@ -835,8 +847,14 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
             g["battery_station"]),
         "servo_depth_available": thickness_at(
             g["servo_station"], g["servo_thickness"]),
-        "battery_depth_available": thickness_at(
-            g["battery_station"], g["root_thickness"]),
+        # Depth at the shallower of the battery's two ends, which is the one
+        # that decides whether it fits.
+        "battery_depth_available": jnp.minimum(
+            thickness_at(g["battery_station"], g["root_thickness"]),
+            thickness_at(
+                g["battery_station"]
+                + BATTERY_LENGTH / jnp.maximum(g["root_chord"], 1e-9),
+                g["root_thickness"])),
         "battery_station": g["battery_station"],
         "pushrod_length": pushrod_length(
             g["servo_chord"], g["servo_station"], g["x_hinge"]),
@@ -951,6 +969,20 @@ MIN_ASPECT_RATIO = 2.5
 # than the optimizer can usually gain by cheating.
 CONSTRAINT_WEIGHT = 5000.0
 
+# Motor position is invisible to the objective: stall speed does not depend on
+# it, and every authority floor is met several times over at every reachable
+# position, so the cost is exactly flat in it.  Left alone the optimizer returns
+# whatever the random start happened to hold, which reads like a recommendation
+# and is not one.
+#
+# So it gets a tie-break instead: a tiny pull toward the outboard limit, on the
+# grounds that yaw is the weakest axis and its authority grows linearly with the
+# moment arm, while wash coverage saturates once the slipstream sits inside the
+# elevon.  The weight is small enough that it can never trade against a real
+# constraint -- it only decides between positions the objective rates equally.
+MOTOR_FRAC_PREFERENCE = 1.0
+TIEBREAK_WEIGHT = 1e-4
+
 
 def _shortfall(value, floor):
     """Fractional shortfall below a floor, zero when satisfied.
@@ -1026,7 +1058,15 @@ def cost(p, cl_max=0.8, deflection_deg=10.0):
     r = evaluate(p, cl_max=cl_max, deflection_deg=deflection_deg)
     violations = constraints(p, cl_max=cl_max, deflection_deg=deflection_deg)
     penalty = sum(v ** 2 for v in violations.values())
-    return r["v_stall"] + CONSTRAINT_WEIGHT * penalty
+
+    # Tie-break only.  See MOTOR_FRAC_PREFERENCE: the objective is exactly flat
+    # in motor position, so without this the answer is whichever random start
+    # survived, which is noise dressed up as a result.
+    g = unpack(p)
+    tiebreak = (MOTOR_FRAC_PREFERENCE - g["motor_y"] / (0.5 * SPAN)) ** 2
+
+    return (r["v_stall"] + CONSTRAINT_WEIGHT * penalty
+            + TIEBREAK_WEIGHT * tiebreak)
 
 
 cost_jit = jax.jit(cost)
