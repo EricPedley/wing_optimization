@@ -916,8 +916,14 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
                 + BATTERY_LENGTH / jnp.maximum(g["root_chord"], 1e-9),
                 g["root_thickness"])),
         "battery_station": g["battery_station"],
+        # Measured against the hinge fraction in the servo's own section, not
+        # the design variable: with a constant-chord elevon x_hinge is the
+        # fraction at the mean aerodynamic chord only, and the servo sits
+        # outboard of that in shorter chord where the hinge lies a larger
+        # fraction aft.  Using x_hinge there overstates the run.
         "pushrod_length": pushrod_length(
-            g["servo_chord"], g["servo_station"], g["x_hinge"]),
+            g["servo_chord"], g["servo_station"],
+            hinge_fraction_at(g["servo_chord"], g["x_hinge"], mac)),
         "yaw_moment": yaw_moment(0.5 * thrust_hover, g["motor_y"]),
         "wash_fraction": washed_span_fraction(
             g["motor_y"], g["elevon_inboard_y"], g["elevon_outboard_y"]),
@@ -1284,9 +1290,12 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=10.0):
         "battery depth": float(r["battery_depth_available"]) - BATTERY_THICKNESS,
         "min thickness": rt - MIN_ROOT_THICKNESS,
         "servo depth": float(r["servo_depth_available"]) - SERVO_DEPTH,
+        # Local hinge fraction, matching what volume_slack enforces.  Reporting
+        # this against the design variable instead would print a slack the
+        # constraint does not agree with, which is worse than not printing it.
         "servo/hinge clearance": (
-            float(g["x_hinge"]) - float(g["servo_station"])
-            - 0.5 * SERVO_LENGTH / sc) * sc,
+            float(hinge_fraction_at(sc, float(g["x_hinge"]), float(r["mac"])))
+            - float(g["servo_station"]) - 0.5 * SERVO_LENGTH / sc) * sc,
         "servo outboard of battery": (
             float(g["servo_y"]) - 0.5 * SERVO_WIDTH),
         "motor wiring reach": MAX_MOTOR_Y - float(g["motor_y"]),
