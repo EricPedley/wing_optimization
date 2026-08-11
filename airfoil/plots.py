@@ -74,7 +74,10 @@ def planform_figure(p=None):
     le_sweep = float(g["le_sweep_deg"])
 
     def chord_at(y):
-        return root_c + (tip_c - root_c) * (abs(y) / semi)
+        # Through the model's own loft, so the constant-chord centre section
+        # shows up in the drawing instead of only in the numbers.
+        return float(am.local_geometry(root_c, tip_c, 0.0, 0.0,
+                                       abs(y) / semi)[0])
 
     def le_at(y):
         return float(am.leading_edge_x(abs(y) / semi, le_sweep))

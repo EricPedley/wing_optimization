@@ -272,7 +272,8 @@ def derived_variables(p):
         return float(am.leading_edge_x(abs(y) / semi, float(g["le_sweep_deg"])))
 
     def chord_at(y):
-        return root_chord + (tip_chord - root_chord) * (abs(y) / semi)
+        return float(am.local_geometry(root_chord, tip_chord, 0.0, 0.0,
+                                       abs(y) / semi)[0])
 
     elevon_in = float(g["elevon_inboard_y"])
     elevon_out = float(g["elevon_outboard_y"])
@@ -289,6 +290,12 @@ def derived_variables(p):
         ("cad_span", LENGTH, am.SPAN, "Full span, tip to tip"),
         ("cad_semi_span", LENGTH, semi, "Centreline to tip"),
         ("cad_root_chord", LENGTH, root_chord, "Root chord"),
+        # The centre strip is a prismatic extrusion of the root section: no
+        # taper, no sweep, so the sketch can extrude it and loft only outboard.
+        ("cad_root_section_width", LENGTH, am.ROOT_SECTION_WIDTH,
+         "Constant-chord centre section, full width across the centreline"),
+        ("cad_root_section_y", LENGTH, 0.5 * am.ROOT_SECTION_WIDTH,
+         "Outboard edge of the constant-chord centre section, where taper starts"),
         ("cad_tip_chord", LENGTH, tip_chord, "Tip chord"),
         ("cad_root_thickness", LENGTH, float(g["root_thickness"]),
          "Maximum root section thickness"),

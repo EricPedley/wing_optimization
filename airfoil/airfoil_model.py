@@ -113,6 +113,17 @@ MIN_ELEVON_CHORD = 0.012     # m
 # into at its outer end rather than terminating in mid-air at the wingtip.
 ELEVON_TIP_MARGIN = 0.010    # m
 
+# Width of the constant-chord centre section, tip to tip across the centreline,
+# so half of it sits either side.  The root section is held at root_chord over
+# this strip and only then starts tapering toward the tip, which is what gives
+# the centreline hardware -- the battery in particular -- a parallel-sided bay
+# to sit in instead of a wedge that starts losing chord immediately.
+#
+# Constant rather than a design variable for now: it trades printability and
+# packaging room against a little area and mass, and there is nothing in the
+# objective that can price that trade honestly yet.
+ROOT_SECTION_WIDTH = 0.010   # m, full width across the centreline
+
 # Thickness ratio band, from published low-Reynolds-number section data rather
 # than from anything this model computes -- nothing here predicts Cl_max against
 # thickness, so this is an imported bound of the same character as the aspect
@@ -430,13 +441,51 @@ def hinge_moment(deflection_deg, x_hinge, thrust_n, v_inf, motor_y,
 # --- Geometry and mass --------------------------------------------------------
 
 
+def root_section_fraction():
+    """Semi-span fraction occupied by the constant-chord centre section."""
+    return jnp.clip(0.5 * ROOT_SECTION_WIDTH / (0.5 * SPAN), 0.0, 1.0)
+
+
+def taper_fraction(span_fraction):
+    """How far into the taper a station sits, 0 at the root, 1 at the tip.
+
+    Zero across the whole constant-chord centre section, then rising linearly
+    over what is left of the semi-span.  Everything that lofts between the root
+    and tip sections -- chord, thickness, and the leading edge -- goes through
+    this, so the parallel-sided centre strip exists once rather than being
+    re-derived in every consumer.
+    """
+    f0 = root_section_fraction()
+    remaining = jnp.maximum(1.0 - f0, 1e-9)
+    return jnp.clip((span_fraction - f0) / remaining, 0.0, 1.0)
+
+
 def planform(root_chord, tip_chord):
-    """Wing area and mean aerodynamic chord for a straight-tapered wing."""
-    area = 0.5 * (root_chord + tip_chord) * SPAN
-    taper = tip_chord / jnp.maximum(root_chord, 1e-9)
-    mac = (2.0 / 3.0) * root_chord * (
-        (1.0 + taper + taper ** 2) / jnp.maximum(1.0 + taper, 1e-9)
-    )
+    """Wing area and mean aerodynamic chord.
+
+    The wing is a constant-chord centre section of width ROOT_SECTION_WIDTH
+    joined to a straight-tapered outer panel, so both quantities are the
+    span-weighted combination of a rectangle and a trapezoid rather than the
+    single trapezoid a pure taper would give.
+
+    MAC is the standard integral (2/S) * integral of c^2 over the semi-span,
+    which for these two pieces is closed form: the rectangle contributes
+    c_root^2 over its span, the trapezoid the usual (2/3) c_r (1+L+L^2)/(1+L).
+    """
+    f0 = root_section_fraction()
+    semi = 0.5 * SPAN
+    span_root = f0 * semi          # per side, constant-chord strip
+    span_taper = (1.0 - f0) * semi  # per side, tapered panel
+
+    area_root = root_chord * span_root
+    area_taper = 0.5 * (root_chord + tip_chord) * span_taper
+    area = 2.0 * (area_root + area_taper)
+
+    # Integral of c^2 over each piece.
+    int_c2_root = root_chord ** 2 * span_root
+    int_c2_taper = (span_taper * (root_chord ** 2 + root_chord * tip_chord
+                                  + tip_chord ** 2) / 3.0)
+    mac = 2.0 * (int_c2_root + int_c2_taper) / jnp.maximum(area, 1e-12)
     return area, mac
 
 
@@ -463,8 +512,16 @@ def reynolds(v_inf, chord):
 
 
 def leading_edge_x(span_fraction, le_sweep_deg):
-    """Leading edge position aft of the root leading edge, in m."""
-    return jnp.tan(jnp.radians(le_sweep_deg)) * span_fraction * 0.5 * SPAN
+    """Leading edge position aft of the root leading edge, in m.
+
+    The centre section is unswept as well as untapered -- it is a straight
+    extrusion of the root -- so the sweep starts at the outboard edge of that
+    strip.  ``le_sweep_deg`` is the sweep of the outer panel, and the tip ends
+    up slightly less far aft than a wing swept from the centreline would.
+    """
+    f0 = root_section_fraction()
+    swept = jnp.maximum(span_fraction - f0, 0.0) * 0.5 * SPAN
+    return jnp.tan(jnp.radians(le_sweep_deg)) * swept
 
 
 def quarter_chord_sweep_deg(root_chord, tip_chord, le_sweep_deg):
@@ -545,11 +602,14 @@ def local_geometry(root_chord, tip_chord, root_thickness, tip_thickness,
                    span_fraction):
     """Chord and maximum thickness at a fraction of the semi-span.
 
-    Straight-tapered wing with both chord and thickness lofted linearly between
-    the root and tip sections.
+    Constant across the centre section, then lofted linearly between the root
+    and tip sections over the tapered panel.  Thickness follows the same
+    schedule as chord so the centre strip is a true prismatic extrusion of the
+    root section rather than a chord-constant but thinning one.
     """
-    chord = root_chord + (tip_chord - root_chord) * span_fraction
-    thickness = root_thickness + (tip_thickness - root_thickness) * span_fraction
+    t = taper_fraction(span_fraction)
+    chord = root_chord + (tip_chord - root_chord) * t
+    thickness = root_thickness + (tip_thickness - root_thickness) * t
     return chord, thickness
 
 
