@@ -79,6 +79,14 @@ BOUNDS = {
     # space including the conventional cambered section.
     "camber_a1": (0.0, 0.15),
     "camber_a2": (-0.05, 0.15),
+    # Tip camber, as an increment on the root's.  Bounded tightly and mostly
+    # negative: the useful move is *washout*, taking camber out of the tip so it
+    # stalls after the root, which on a swept tailless wing is what turns a
+    # departure into a nose drop.  A little the other way is allowed so the
+    # bound is not silently doing the choosing, but a tip more cambered than the
+    # root is a bad idea and the box says so.
+    "tip_camber_da1": (-0.10, 0.02),
+    "tip_camber_da2": (-0.10, 0.02),
     # --- Linkage, all in millimetres.  These feed linkage_model directly, which
     # works in mm; airfoil.linkage_coupling is where the two unit systems meet.
     #

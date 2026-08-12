@@ -259,8 +259,39 @@ def planform_figure(p=None):
     return fig
 
 
+def _box(x0, x1, depth, chord, thickness, a1, a2):
+    """A rigid box seated in the section, as plotly x/y in millimetres.
+
+    Boxes used to be drawn centred on the chord line, which was right while the
+    section was symmetric and wrong the moment it was not: a cambered section
+    sits above its chord, so a box centred on y=0 hangs out through the lower
+    surface even when the model says it fits.  That looked like a packaging
+    failure the model was ignoring, when in fact the model was right and only
+    the drawing was wrong.
+
+    Seated against the *highest* point of the lower surface over its own
+    footprint, which is where a real box lands: it rests on whichever part of
+    the inner skin rises furthest into it.  The remaining gap to the upper
+    surface is then the real spare room, which is what the drawing is for.
+    """
+    xs = np.linspace(x0 / chord, x1 / chord, 9)
+    half = 0.5 * np.asarray(am.thickness_at(xs, thickness))
+    camber = np.asarray(am.camber_line(xs, a1, a2)) * chord
+    floor = float(np.max(camber - half))
+    return {
+        "x": np.array([x0, x1, x1, x0, x0]) * 1e3,
+        "y": np.array([floor, floor, floor + depth, floor + depth, floor]) * 1e3,
+    }
+
+
 def section_figure(p=None):
-    """Root section with the battery and servo drawn to scale inside it."""
+    """Root section with the battery and servo drawn to scale inside it.
+
+    The tip section is overlaid on the same axes, drawn to its own chord, so the
+    two shapes can be compared directly.  They are no longer the same section
+    scaled: the tip carries its own camber, and the difference between them is
+    the washout that decides which end of the wing stalls first.
+    """
     p = default_design() if p is None else p
     g = am.unpack(p)
     r = am.evaluate(p)
@@ -303,16 +334,36 @@ def section_figure(p=None):
         name="Chord", hoverinfo="skip",
     ))
 
+    # Tip section, at its own chord and its own camber.  Outline only, no fill,
+    # so it reads as an overlay rather than competing with the root for
+    # attention -- the root is the one with the packaging problem, the tip is
+    # here to be compared against it.
+    tip_chord = float(g["tip_chord"])
+    tip_xs, tip_upper, tip_lower, tip_camber = _section_outline(
+        tip_chord, float(g["tip_thickness"]),
+        float(g["tip_camber_a1"]), float(g["tip_camber_a2"]))
+    fig.add_trace(go.Scatter(
+        x=np.concatenate([tip_xs, tip_xs[::-1]]) * 1e3,
+        y=np.concatenate([tip_upper, tip_lower[::-1]]) * 1e3,
+        mode="lines", line={"color": "steelblue", "width": 2},
+        name=f"Tip section ({float(r['tip_camber']) * 100:.1f}% camber)",
+        hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=tip_xs * 1e3, y=tip_camber * 1e3,
+        mode="lines", line={"color": "steelblue", "width": 1, "dash": "dot"},
+        name="Tip camber", hoverinfo="skip", showlegend=False,
+    ))
+
     # Battery, drawn at its own depth rather than the section's, so the gap
     # between the box and the surface shows how much room is actually spare.
     # Its forward face is the tight end: that is where the nose runs out of
     # depth, and pushing it further forward is what forces a thicker root.
     batt_x0 = float(g["battery_station"]) * chord
     batt_x1 = batt_x0 + am.BATTERY_LENGTH
-    batt_h = 0.5 * am.BATTERY_THICKNESS
     fig.add_trace(go.Scatter(
-        x=np.array([batt_x0, batt_x1, batt_x1, batt_x0, batt_x0]) * 1e3,
-        y=np.array([-batt_h, -batt_h, batt_h, batt_h, -batt_h]) * 1e3,
+        **_box(batt_x0, batt_x1, am.BATTERY_THICKNESS, chord, thick,
+               float(g["camber_a1"]), float(g["camber_a2"])),
         mode="lines", line={"color": "green", "width": 2},
         fill="toself", fillcolor="rgba(80,180,80,0.3)",
         name="Battery", hoverinfo="skip",
@@ -325,21 +376,32 @@ def section_figure(p=None):
     servo_chord = float(g["servo_chord"])
     sv_x0 = station * servo_chord - 0.5 * am.SERVO_LENGTH
     sv_x1 = station * servo_chord + 0.5 * am.SERVO_LENGTH
-    sv_h = 0.5 * am.SERVO_DEPTH
+    # Seated in its *own* section, not the root's: the servo sits outboard where
+    # the wing is shorter, thinner, and -- now that the tip carries its own
+    # camber -- a different shape.  Drawing it against the root section would
+    # show it fitting in room that does not exist where it actually lives.
+    sv_a1, sv_a2 = am.local_camber(
+        float(g["camber_a1"]), float(g["camber_a2"]),
+        float(g["tip_camber_a1"]), float(g["tip_camber_a2"]),
+        float(g["servo_span_frac"]))
+    servo_box = _box(sv_x0, sv_x1, am.SERVO_DEPTH, servo_chord,
+                     float(g["servo_thickness"]), float(sv_a1), float(sv_a2))
     fig.add_trace(go.Scatter(
-        x=np.array([sv_x0, sv_x1, sv_x1, sv_x0, sv_x0]) * 1e3,
-        y=np.array([-sv_h, -sv_h, sv_h, sv_h, -sv_h]) * 1e3,
+        **servo_box,
         mode="lines", line={"color": "purple", "width": 2, "dash": "dash"},
         fill="toself", fillcolor="rgba(160,80,200,0.25)",
         name=f"Servo (at {float(g['servo_span_frac']) * 100:.0f}% semi-span)",
         hoverinfo="skip",
     ))
 
-    # Pushrod from the servo output to the hinge, straight-line schematic.
+    # Pushrod from the servo output to the hinge, straight-line schematic.  Run
+    # at the servo's own mid-height rather than along the chord line, so it
+    # leaves the servo where the servo actually is.
+    sv_mid = 0.5 * (servo_box["y"][0] + servo_box["y"][2])
     fig.add_trace(go.Scatter(
-        x=np.array([sv_x1, servo_chord - float(am.elevon_chord_at(
-            servo_chord, float(g["x_hinge"]), mac))]) * 1e3,
-        y=np.array([0.0, 0.0]) * 1e3,
+        x=np.array([sv_x1 * 1e3, (servo_chord - float(am.elevon_chord_at(
+            servo_chord, float(g["x_hinge"]), mac))) * 1e3]),
+        y=np.array([sv_mid, sv_mid]),
         mode="lines", line={"color": "purple", "width": 1, "dash": "dot"},
         name="Pushrod", hoverinfo="skip",
     ))
@@ -358,9 +420,11 @@ def section_figure(p=None):
 
     slack = float(r["volume_slack"]) * 1e3
     fig.update_layout(
-        title=(f"Root section  --  {chord * 1e3:.0f} mm chord,"
-               f" {float(r['root_tc']) * 100:.1f}% thick,"
-               f" {float(r['camber']) * 100:.1f}% camber,"
+        title=(f"Sections  --  root {chord * 1e3:.0f} mm /"
+               f" tip {tip_chord * 1e3:.0f} mm,"
+               f" camber {float(r['camber']) * 100:.1f}% /"
+               f" {float(r['tip_camber']) * 100:.1f}%"
+               f" (washout {float(r['washout']) * 100:.1f}%),"
                f" Cm0 {float(r['cm_c4']):+.3f},"
                f" slack {slack:+.1f} mm"),
         xaxis={"title": "chord, mm"},

@@ -1040,6 +1040,17 @@ def thickness_at(x, max_thickness):
     return max_thickness * shape / 0.1000
 
 
+def local_camber(a1, a2, tip_a1, tip_a2, span_fraction):
+    """Camber coefficients at a fraction of the semi-span.
+
+    Lofted on the same schedule as chord and thickness, so the constant-chord
+    centre strip is a true prismatic extrusion of the root section rather than
+    one that starts twisting immediately.
+    """
+    t = taper_fraction(span_fraction)
+    return a1 + (tip_a1 - a1) * t, a2 + (tip_a2 - a2) * t
+
+
 def local_geometry(root_chord, tip_chord, root_thickness, tip_thickness,
                    span_fraction):
     """Chord and maximum thickness at a fraction of the semi-span.
@@ -1078,7 +1089,7 @@ def hinge_fraction_at(chord, x_hinge, mac):
     return 1.0 - elevon_chord_at(chord, x_hinge, mac) / jnp.maximum(chord, 1e-9)
 
 
-def servo_slack(chord, thickness, servo_chord_frac, x_hinge):
+def servo_slack(chord, thickness, servo_chord_frac, x_hinge, a1=0.0, a2=0.0):
     """Room around the servo at its chordwise station, in m.
 
     ``servo_chord_frac`` is the chord fraction where the servo body is centred, and
@@ -1088,6 +1099,13 @@ def servo_slack(chord, thickness, servo_chord_frac, x_hinge):
     Two things are checked: the section is deep enough for the servo where it
     actually sits, and the servo body fits between that station and the hinge.
 
+    Depth is the straight-slot depth over the body's whole footprint, for the
+    same reason as the battery: the servo is a rigid box, it cannot follow the
+    camber line, and it is long enough relative to this chord that the section
+    changes noticeably across it.  Checking only the centre station -- which is
+    what this did before there was any camber to worry about -- overstates the
+    room at both ends.
+
     Moving the servo forward relaxes the depth constraint quickly, because
     section thickness aft of maximum falls off quadratically.  It does not come
     free -- the pushrod gets longer and drives the horn increasingly off-axis,
@@ -1095,11 +1113,15 @@ def servo_slack(chord, thickness, servo_chord_frac, x_hinge):
     cost belongs to the linkage model, not here.  What this function reports is
     the packaging half of the trade.
     """
-    depth_slack = thickness_at(servo_chord_frac, thickness) - SERVO_DEPTH
+    half_len = 0.5 * SERVO_LENGTH / jnp.maximum(chord, 1e-9)
+    depth_slack = box_depth(chord, thickness,
+                            servo_chord_frac - half_len,
+                            servo_chord_frac + half_len,
+                            a1, a2) - SERVO_DEPTH
 
     # The servo body occupies chord centred on its station; the hinge must be
     # far enough aft that the body does not run into it.
-    body_aft_edge = servo_chord_frac + 0.5 * SERVO_LENGTH / chord
+    body_aft_edge = servo_chord_frac + half_len
     clearance_slack = (x_hinge - body_aft_edge) * chord
 
     return jnp.minimum(depth_slack, clearance_slack)
@@ -1114,32 +1136,58 @@ def pushrod_length(chord, servo_chord_frac, x_hinge):
     return (x_hinge - servo_chord_frac) * chord
 
 
-def battery_slack(root_chord, root_thickness, battery_station):
+def box_depth(chord, thickness, x0, x1, a1, a2, n=9):
+    """Depth of the largest straight slot between ``x0`` and ``x1``, in m.
+
+    The quantity a rigid box actually needs, which is *not* the section's
+    thickness.  Thickness is measured perpendicular to the camber line and each
+    station has its own; a battery or a servo is a straight box that has to fit
+    between one flat plane above and another below, across its whole length.
+    So the usable depth is the overlap of the surfaces over the box's footprint:
+    the lowest upper surface minus the highest lower surface.
+
+    On a symmetric section the two are the same thing, which is why this did not
+    exist before camber did.  Once the section is cambered they diverge, and the
+    difference is not small: at the optimum the section reports 11.0 mm of
+    thickness under the battery while the straight slot is 10.8 mm, which is the
+    difference between the battery fitting and not.
+
+    Sampled over the footprint rather than evaluated at the two ends.  With
+    camber the extremes of the two surfaces need not be at the ends -- the upper
+    surface peaks in the middle while the lower one is still falling -- so the
+    two-point check that was correct for a symmetric section is not correct here.
+    """
+    x = jnp.linspace(x0, x1, n)
+    half = 0.5 * thickness_at(x, thickness)
+    camber = camber_line(x, a1, a2) * chord
+    upper = camber + half
+    lower = camber - half
+    return jnp.min(upper) - jnp.max(lower)
+
+
+def battery_slack(root_chord, root_thickness, battery_station, a1=0.0, a2=0.0):
     """Room around the battery at its chordwise station, in m.
 
     Two checks.  The battery must fit between its station and the trailing edge,
     which wants it forward; and the section must be deep enough for it over its
     whole length, which wants it centred on the thickest part.
 
-    Depth is checked at both faces rather than at one, because which face is
-    tighter depends on where the box lands: forward of maximum thickness the
-    nose is the problem, aft of it the tail is.  Checking only one face lets the
-    optimizer slide the battery past the crest and clip the shell at the other
-    end, which is exactly what happened when only the forward face was tested.
-    The section is single-peaked, so the minimum over the box is always at one
-    end or the other and the two samples are enough.
+    Depth is the straight-slot depth over the battery's whole footprint, not the
+    section thickness at its faces -- see :func:`box_depth`.  A battery is a
+    rigid box and cannot follow the camber line, so on a cambered section the
+    slot is always shallower than the thickness, and checking thickness alone
+    reports a battery fitting when it does not.
     """
     length_slack = (1.0 - battery_station) * root_chord - BATTERY_LENGTH
     aft_station = battery_station + BATTERY_LENGTH / jnp.maximum(root_chord, 1e-9)
-    depth_slack = jnp.minimum(
-        thickness_at(battery_station, root_thickness),
-        thickness_at(aft_station, root_thickness),
-    ) - BATTERY_THICKNESS
+    depth_slack = box_depth(root_chord, root_thickness, battery_station,
+                            aft_station, a1, a2) - BATTERY_THICKNESS
     return jnp.minimum(length_slack, depth_slack)
 
 
 def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
-                 servo_chord_frac, servo_span_fraction, x_hinge, battery_station):
+                 servo_chord_frac, servo_span_fraction, x_hinge, battery_station,
+                 a1=0.0, a2=0.0):
     """How much room the wing has beyond what it must hold, in m.
 
     Positive means everything fits.  The battery and the servos are checked at
@@ -1150,7 +1198,7 @@ def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
     model previously invented, making the design look infeasible when it was
     only badly drawn.
     """
-    battery = battery_slack(root_chord, root_thickness, battery_station)
+    battery = battery_slack(root_chord, root_thickness, battery_station, a1, a2)
     thickness_slack = root_thickness - MIN_ROOT_THICKNESS
 
     chord, thickness = local_geometry(root_chord, tip_chord, root_thickness,
@@ -1159,7 +1207,7 @@ def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
     # fraction is not x_hinge once the elevon is constant-chord.
     _, mac = planform(root_chord, tip_chord)
     x_hinge_local = hinge_fraction_at(chord, x_hinge, mac)
-    servo = servo_slack(chord, thickness, servo_chord_frac, x_hinge_local)
+    servo = servo_slack(chord, thickness, servo_chord_frac, x_hinge_local, a1, a2)
 
     # The servo must sit outboard of the battery, which occupies the centre
     # section out to roughly half its own width either side of the centreline.
@@ -1343,7 +1391,13 @@ DESIGN_VARS = ["root_chord", "tip_chord", "root_thickness", "tip_thickness",
                # geometric shape.  See the camber section for why: reflex is
                # exactly A2 = A1 in these coordinates, and everything past A2
                # would be invisible to both lift and moment.
-               "camber_a1", "camber_a2",
+               # Root camber, and the tip's as an increment on it.  Stated as a
+               # delta rather than as an independent pair so that "the same
+               # section everywhere" is the origin rather than a coincidence the
+               # optimizer has to find, and so washout can be bounded directly:
+               # the useful range is a small twist, not an arbitrary second
+               # section.
+               "camber_a1", "camber_a2", "tip_camber_da1", "tip_camber_da2",
                # Linkage geometry, in millimetres.  See airfoil.linkage_coupling
                # for why these live in the same vector as the wing: the servo's
                # stroke is a fixed budget spent on torque or throw, and only the
@@ -1390,6 +1444,15 @@ def unpack(p):
         "le_sweep_deg": v["le_sweep_deg"],
         "camber_a1": v["camber_a1"],
         "camber_a2": v["camber_a2"],
+        # Tip section, as root plus the increment.  Aerodynamic washout: a tip
+        # with less camber than the root reaches its stall angle later, so the
+        # root stalls first and the aircraft drops its nose instead of a wing.
+        # On a swept tailless wing that is the difference between a stall and a
+        # departure, which is why the tip is allowed its own shape at all.
+        "tip_camber_a1": v["camber_a1"] + v["tip_camber_da1"],
+        "tip_camber_a2": v["camber_a2"] + v["tip_camber_da2"],
+        "tip_camber_da1": v["tip_camber_da1"],
+        "tip_camber_da2": v["tip_camber_da2"],
         # Linkage, millimetres, passed through untouched.  servo_height is the
         # rail's offset perpendicular to the hinge axis, which is a different
         # axis from servo_y above -- see airfoil.linkage_coupling.
@@ -1455,7 +1518,25 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
                       g["root_thickness"], g["tip_thickness"])
 
     camber, camber_x = camber_max(g["camber_a1"], g["camber_a2"])
-    cm_c4 = cm_quarter_chord(g["camber_a1"], g["camber_a2"])
+    tip_camber, tip_camber_x = camber_max(g["tip_camber_a1"], g["tip_camber_a2"])
+
+    # Pitching moment of the wing, not of the root section.  With the tip free
+    # to carry a different camber the two sections no longer agree, and it is
+    # the area-weighted average that the aircraft actually trims against --
+    # weighting by chord because a section's moment scales with its own chord
+    # squared while its area scales with the chord.  Sampled across the
+    # semi-span rather than averaged between root and tip, since chord and
+    # camber both vary and their product is not linear.
+    _spans = jnp.linspace(0.0, 1.0, 9)
+    _chords = jnp.stack([local_geometry(g["root_chord"], g["tip_chord"],
+                                        g["root_thickness"], g["tip_thickness"],
+                                        s)[0] for s in _spans])
+    _cms = jnp.stack([
+        cm_quarter_chord(*local_camber(g["camber_a1"], g["camber_a2"],
+                                       g["tip_camber_a1"], g["tip_camber_a2"], s))
+        for s in _spans])
+    cm_c4 = (jnp.sum(_cms * _chords ** 2) / jnp.maximum(
+        jnp.sum(_chords ** 2), 1e-12))
 
     # Cl_max, and with it the stall speed, now depends on the design.  There is
     # a circularity to break: Cl_max wants the Reynolds number, which wants the
@@ -1470,9 +1551,13 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
         # At the mean aerodynamic chord and at the tip, taking the worse.  The
         # tip runs at a lower Reynolds number and stalls first, and tip stall on
         # a swept tailless wing is the departure mode that actually hurts.
+        # The tip is evaluated with its *own* camber, which is what makes
+        # washout cost something: a tip decambered to stall late also makes less
+        # lift, so the wing's usable Cl_max falls with it.  Without this the
+        # optimizer would decamber the tip for free.
         cl_max = jnp.minimum(
             max_lift_coefficient(camber, tc_mean, reynolds(v_stall_seed, mac)),
-            max_lift_coefficient(camber, g["tip_thickness"]
+            max_lift_coefficient(tip_camber, g["tip_thickness"]
                                  / jnp.maximum(g["tip_chord"], 1e-9),
                                  reynolds(v_stall_seed, g["tip_chord"])))
 
@@ -1641,7 +1726,17 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
         "cl_max": cl_max,
         "camber": camber,
         "camber_station": camber_x,
+        "tip_camber": tip_camber,
+        "tip_camber_station": tip_camber_x,
+        # Aerodynamic washout, as the camber the tip gives up relative to the
+        # root.  Positive means the tip is decambered, which is what makes the
+        # root stall first.  This is the quantity the tip-stall constraint acts
+        # on, and it is reported because it is the shape difference between the
+        # two sections stated as one number.
+        "washout": camber - tip_camber,
         "cm_c4": cm_c4,
+        "cm_c4_root": cm_quarter_chord(g["camber_a1"], g["camber_a2"]),
+        "cm_c4_tip": cm_quarter_chord(g["tip_camber_a1"], g["tip_camber_a2"]),
         "static_margin": margin,
         "cg_station": cg_station(
             g["root_chord"], g["tip_chord"], g["root_thickness"],
@@ -1678,17 +1773,21 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
             g["root_chord"], g["tip_chord"],
             g["root_thickness"], g["tip_thickness"],
             g["servo_chord_frac"], g["servo_span_frac"], g["x_hinge"],
-            g["battery_station"]),
-        "servo_depth_available": thickness_at(
-            g["servo_chord_frac"], g["servo_thickness"]),
-        # Depth at the shallower of the battery's two ends, which is the one
-        # that decides whether it fits.
-        "battery_depth_available": jnp.minimum(
-            thickness_at(g["battery_station"], g["root_thickness"]),
-            thickness_at(
-                g["battery_station"]
-                + BATTERY_LENGTH / jnp.maximum(g["root_chord"], 1e-9),
-                g["root_thickness"])),
+            g["battery_station"], g["camber_a1"], g["camber_a2"]),
+        # Straight-slot depths, not section thicknesses: both items are rigid
+        # boxes and neither can follow the camber line.  See box_depth.
+        "servo_depth_available": box_depth(
+            g["servo_chord"], g["servo_thickness"],
+            g["servo_chord_frac"] - 0.5 * SERVO_LENGTH
+            / jnp.maximum(g["servo_chord"], 1e-9),
+            g["servo_chord_frac"] + 0.5 * SERVO_LENGTH
+            / jnp.maximum(g["servo_chord"], 1e-9),
+            g["camber_a1"], g["camber_a2"]),
+        "battery_depth_available": box_depth(
+            g["root_chord"], g["root_thickness"], g["battery_station"],
+            g["battery_station"]
+            + BATTERY_LENGTH / jnp.maximum(g["root_chord"], 1e-9),
+            g["camber_a1"], g["camber_a2"]),
         "battery_station": g["battery_station"],
         # Measured against the hinge fraction in the servo's own section, not
         # the design variable: with a constant-chord elevon x_hinge is the
@@ -1802,6 +1901,25 @@ MIN_STATIC_MARGIN = 0.05
 # permanently deflected surface is a permanently separated one at this Reynolds
 # number.  5 degrees is about where a flying wing stops being efficient.
 MAX_TRIM_DEFLECTION = 5.0
+
+# Minimum aerodynamic washout, as camber given up between root and tip.
+#
+# A swept wing stalls at the tip first: the tip runs at a lower Reynolds number
+# because its chord is shorter, and sweep drives the boundary layer outboard.
+# On a tailless aircraft the elevons are at the tip, so a tip stall takes the
+# pitch control with it at the moment it is most needed, and because the tip is
+# behind the centre of gravity the nose pitches *up* as it goes -- the classic
+# swept-wing departure.
+#
+# Taking camber out of the tip makes the root reach its stall angle first, so
+# the aircraft drops its nose and recovers instead.  0.5% of chord is a modest
+# amount, chosen to be clearly better than nothing without demanding a tip so
+# decambered that it stops carrying its share of the lift.
+#
+# This constraint is what gives the tip section a reason to differ from the root
+# at all.  Without it the two would be identical, since matching them costs
+# nothing and washout costs Cl_max.
+MIN_WASHOUT = 0.005
 
 # Reynolds number below which the section data underpinning this model stops
 # meaning much.  Not a hard physical limit, but a statement that the model
@@ -1938,6 +2056,10 @@ def constraints(p, cl_max=None, deflection_deg=None):
         # with a permanently deflected surface, which is draggy and stalls
         # earlier than the section data assumes.
         "trim_deflection": _excess(jnp.abs(r["eta_trim"]), MAX_TRIM_DEFLECTION),
+        # Tip stall protection.  The tip has to be less cambered than the root
+        # so the root stalls first -- see MIN_WASHOUT.  Normalized by the floor
+        # like the other fractional shortfalls.
+        "washout": _shortfall(r["washout"], MIN_WASHOUT),
         # The prop has to miss the wing.  Only binds once the motors are pulled
         # inboard, which the wiring reach and the packaging both encourage.
         "prop_clearance": jnp.maximum(0.0, -r["prop_clearance"]) / 0.001,
@@ -2118,6 +2240,11 @@ BASELINE = jnp.array([
     # lift nor reflex for trim, and lets the optimizer decide which it wants.
     0.08,    # camber_a1
     0.08,    # camber_a2
+    # Tip camber as an increment on the root.  Started at zero -- the same
+    # section everywhere -- so that any washout in the answer was chosen rather
+    # than inherited from the start.
+    0.0,     # tip_camber_da1
+    0.0,     # tip_camber_da2
     # Linkage, mm.  Taken from the sliders the interactive linkage tool was
     # left on, except servo_x, which is now derived from the wing geometry.
     3.55,    # servo_height, servo body depth off the hinge axis
@@ -2151,8 +2278,12 @@ def report(p=None, v_cruise=12.0, cl_max=None, deflection_deg=None):
     print(f"  camber          {float(r['camber']) * 100:8.2f} %"
           f"   (at {float(r['camber_station']) * 100:.0f}% chord,"
           f" A1 {float(g['camber_a1']):+.3f} A2 {float(g['camber_a2']):+.3f})")
+    print(f"  tip camber      {float(r['tip_camber']) * 100:8.2f} %"
+          f"   (washout {float(r['washout']) * 100:+.2f}%,"
+          f" floor {MIN_WASHOUT * 100:.1f}%)")
     reflex = "reflexed" if float(g["camber_a2"]) > float(g["camber_a1"]) else "plain"
-    print(f"  Cm about c/4    {float(r['cm_c4']):+8.4f}     ({reflex})")
+    print(f"  Cm about c/4    {float(r['cm_c4']):+8.4f}     ({reflex},"
+          f" root {float(r['cm_c4_root']):+.4f} tip {float(r['cm_c4_tip']):+.4f})")
     print(f"  Cl_max          {float(r['cl_max']):8.2f}     (was a constant 0.80)")
     print(f"  CG              {float(r['cg_station']) * 1e3:8.1f} mm aft of root LE")
     print(f"  AC              {float(r['ac_station']) * 1e3:8.1f} mm aft of root LE")

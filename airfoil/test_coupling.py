@@ -234,3 +234,124 @@ def test_cost_gradient_is_finite_across_the_box():
     for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
         x = lower + frac * (upper - lower)
         assert bool(jnp.all(jnp.isfinite(grad(x)))), f"non-finite gradient at {frac}"
+
+
+# --- Rigid boxes in a curved section ------------------------------------------
+
+
+def test_box_depth_reduces_to_thickness_on_a_symmetric_section():
+    """The straight-slot depth and the section thickness are the same thing only
+    when there is no camber.  If they disagree at zero camber, box_depth has
+    broken the symmetric case it replaced."""
+    chord, thickness = 0.12, 0.015
+    for x0, x1 in [(0.10, 0.60), (0.05, 0.20), (0.30, 0.35)]:
+        slot = float(am.box_depth(chord, thickness, x0, x1, 0.0, 0.0))
+        ends = min(float(am.thickness_at(x0, thickness)),
+                   float(am.thickness_at(x1, thickness)))
+        assert slot == pytest.approx(ends, abs=1e-9)
+
+
+def test_camber_makes_the_usable_slot_shallower():
+    """A battery is a rigid box and cannot follow the camber line, so the slot
+    it can use is always shallower than the section is thick.  Checking
+    thickness instead -- which is what the model did before camber existed --
+    reports boxes fitting that do not."""
+    chord, thickness = 0.126, 0.0152
+    x0, x1 = 0.08, 0.08 + am.BATTERY_LENGTH / chord
+    flat = float(am.box_depth(chord, thickness, x0, x1, 0.0, 0.0))
+    curved = float(am.box_depth(chord, thickness, x0, x1, 0.083, 0.126))
+    assert curved < flat
+
+
+def test_packaging_accounts_for_camber():
+    """End to end: the same geometry must report less room once the section is
+    cambered.  This is the check that failed silently -- volume_slack read
+    exactly zero on a design whose battery was 0.2 mm too deep to fit."""
+    i1 = am.DESIGN_VARS.index("camber_a1")
+    i2 = am.DESIGN_VARS.index("camber_a2")
+    flat = am.BASELINE.at[i1].set(0.0).at[i2].set(0.0)
+    curved = am.BASELINE.at[i1].set(0.12).at[i2].set(0.02)
+    assert float(am.evaluate(curved)["volume_slack"]) < \
+        float(am.evaluate(flat)["volume_slack"])
+
+
+# --- Tip section --------------------------------------------------------------
+
+
+def test_tip_camber_is_independent_of_the_root():
+    """The tip carries its own shape, not a scaled copy of the root's.  If the
+    increment stops reaching the tip section, washout silently becomes
+    impossible and the tip-stall constraint can never be satisfied."""
+    i = am.DESIGN_VARS.index("tip_camber_da1")
+    twisted = am.BASELINE.at[i].set(-0.05)
+    g = am.unpack(twisted)
+    assert float(g["tip_camber_a1"]) == pytest.approx(
+        float(g["camber_a1"]) - 0.05)
+    r = am.evaluate(twisted)
+    assert float(r["tip_camber"]) < float(r["camber"])
+    assert float(r["washout"]) > 0.0
+
+
+def test_washout_costs_lift():
+    """Decambering the tip must reduce the wing's Cl_max, or washout is free and
+    the optimizer takes it without trading anything for the stall protection."""
+    i = am.DESIGN_VARS.index("tip_camber_da1")
+    none = am.BASELINE.at[i].set(0.0)
+    lots = am.BASELINE.at[i].set(-0.08)
+    assert float(am.evaluate(lots)["cl_max"]) < float(am.evaluate(none)["cl_max"])
+
+
+def test_wing_moment_lies_between_the_two_sections():
+    """Cm is the wing's, not the root's.  With the tip free to differ, the
+    area-weighted average has to sit between the two section values -- a result
+    equal to either one means the loft is not being sampled."""
+    i = am.DESIGN_VARS.index("tip_camber_da2")
+    x = am.BASELINE.at[i].set(-0.06)
+    r = am.evaluate(x)
+    lo = min(float(r["cm_c4_root"]), float(r["cm_c4_tip"]))
+    hi = max(float(r["cm_c4_root"]), float(r["cm_c4_tip"]))
+    assert lo <= float(r["cm_c4"]) <= hi
+    assert float(r["cm_c4_root"]) != pytest.approx(float(r["cm_c4_tip"]))
+
+
+def test_drawn_boxes_sit_inside_the_section():
+    """The drawing has to agree with the packaging model.
+
+    Boxes were once drawn centred on the chord line, which is right only for a
+    symmetric section.  On a cambered one the section sits above its chord, so a
+    box centred on y=0 hung out through the lower surface and looked like a
+    packaging failure the model was ignoring -- when the model was correct and
+    the picture was not.  A drawing that disagrees with the constraint is worse
+    than no drawing, because it gets believed.
+    """
+    plots = pytest.importorskip("airfoil.plots")
+    np = pytest.importorskip("numpy")
+
+    g = am.unpack(am.BASELINE)
+    fig = plots.section_figure(am.BASELINE)
+    traces = {t.name: t for t in fig.data if t.name}
+
+    def surfaces(x_mm, chord, thickness, a1, a2):
+        xs = np.asarray(x_mm) / 1e3 / chord
+        half = 0.5 * np.asarray(am.thickness_at(xs, thickness))
+        camber = np.asarray(am.camber_line(xs, a1, a2)) * chord
+        return (camber - half) * 1e3, (camber + half) * 1e3
+
+    box = traces["Battery"]
+    lower, upper = surfaces(box.x[:2], float(g["root_chord"]),
+                            float(g["root_thickness"]),
+                            float(g["camber_a1"]), float(g["camber_a2"]))
+
+    # The box rests on the inner skin, so its floor is exactly the highest point
+    # of the lower surface over its own footprint.
+    assert min(box.y) == pytest.approx(max(lower), abs=1e-6)
+
+    # Its lid then agrees with the model's slack, sign and all.  Containment is
+    # deliberately *not* asserted: the baseline battery does not fit, and a
+    # drawing that cannot show that is a drawing that hides the constraint it
+    # exists to illustrate.  What must hold is that the picture and the number
+    # tell the same story.
+    r = am.evaluate(am.BASELINE)
+    drawn_gap = (min(upper) - max(box.y)) / 1e3
+    assert drawn_gap == pytest.approx(
+        float(r["battery_depth_available"]) - am.BATTERY_THICKNESS, abs=1e-9)
