@@ -65,6 +65,20 @@ BOUNDS = {
     # all, and away from the trailing edge because the battery still has to fit
     # ahead of it.
     "battery_station": (0.02, 0.40),
+    # Camber, as Birnbaum-Glauert coefficients.  These are not directly
+    # readable as a shape -- see the camber section of the model -- so the
+    # bounds are set by what they produce rather than by what they look like:
+    # the box spans roughly 0 to 4% camber, which covers everything from a
+    # symmetric section to about as much camber as is useful at this Reynolds
+    # number.
+    #
+    # A1 is floored at zero because negative camber is not a design this
+    # aircraft wants.  A2 is allowed negative so the optimizer can reach
+    # ordinary (nose-down) camber lines as well as reflexed ones: reflex is
+    # A2 > A1, and pinning A2 positive would have quietly forbidden half the
+    # space including the conventional cambered section.
+    "camber_a1": (0.0, 0.15),
+    "camber_a2": (-0.05, 0.15),
     # --- Linkage, all in millimetres.  These feed linkage_model directly, which
     # works in mm; airfoil.linkage_coupling is where the two unit systems meet.
     #

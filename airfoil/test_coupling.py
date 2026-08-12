@@ -139,3 +139,98 @@ def test_unpack_is_positionally_consistent():
     for i, name in enumerate(am.DESIGN_VARS):
         if name in g:
             assert float(g[name]) == pytest.approx(float(am.BASELINE[i]))
+
+
+# --- Camber, balance, and trim ------------------------------------------------
+#
+# The trim sign was wrong once already: the Cl * static_margin term was written
+# positive, which makes a stable aircraft appear to need down elevon and rewards
+# exactly the wrong camber.  Everything still ran and the optimizer still
+# converged, to a design bought with inverted physics.  These pin the signs.
+
+
+def test_camber_line_closes_at_both_ends():
+    """A camber line is measured from the chord, so it is zero at both ends by
+    definition.  The raw Glauert integral is not -- the A2 term reaches -A2/3 at
+    the trailing edge -- and camber_line subtracts that ramp.  If the correction
+    is dropped, every camber and thickness figure is quietly measured from a
+    line that is not the chord."""
+    for a1, a2 in [(0.10, 0.05), (0.05, 0.12), (0.0, 0.08), (0.09, -0.03)]:
+        assert float(am.camber_line(0.0, a1, a2)) == pytest.approx(0.0, abs=1e-9)
+        assert float(am.camber_line(1.0, a1, a2)) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_reflex_is_exactly_a2_equals_a1():
+    """The whole reason for parameterizing by Glauert coefficients rather than a
+    geometric shape: zero pitching moment is an equality, not a root solve."""
+    for a in (0.0, 0.05, 0.10, 0.15):
+        assert float(am.cm_quarter_chord(a, a)) == pytest.approx(0.0, abs=1e-12)
+    # And the sign either side of it, which is what "reflex" means.
+    assert float(am.cm_quarter_chord(0.10, 0.04)) < 0.0   # plain camber, nose-down
+    assert float(am.cm_quarter_chord(0.04, 0.10)) > 0.0   # reflexed, nose-up
+
+
+def test_stable_wing_trims_with_up_elevon():
+    """The sign that was wrong.  A stable aircraft carries its lift behind the
+    centre of gravity, which is nose-down, so it needs *up* elevon -- negative
+    deflection -- to hold level flight.  A positive answer here means the
+    Cl * static_margin term has the wrong sign, which inverts the trim direction
+    and makes the optimizer prefer camber it should reject."""
+    x_hinge = 0.75
+    # Symmetric section, stable: must need up elevon.
+    assert float(am.trim_deflection_deg(0.0, 0.20, 0.10, x_hinge)) < 0.0
+    # Plain camber makes it worse, reflex makes it better.
+    plain = float(am.trim_deflection_deg(-0.04, 0.20, 0.10, x_hinge))
+    reflexed = float(am.trim_deflection_deg(+0.04, 0.20, 0.10, x_hinge))
+    assert plain < reflexed
+    # Neutral margin with a symmetric section needs no trim at all.
+    assert float(am.trim_deflection_deg(0.0, 0.20, 0.0, x_hinge)) == pytest.approx(0.0)
+
+
+def test_static_margin_sign_and_sweep_direction():
+    """Positive static margin means the CG is ahead of the aerodynamic centre,
+    and sweeping the wing aft must increase it -- that is the only reason a
+    tailless aircraft is swept.  A sign slip here would have the optimizer
+    sweeping the wing forward to buy stability."""
+    g = am.unpack(am.BASELINE)
+    args = [float(g["root_chord"]), float(g["tip_chord"]),
+            float(g["root_thickness"]), float(g["tip_thickness"])]
+    _, mac = am.planform(args[0], args[1])
+    tail = [float(g["battery_station"]), float(g["servo_chord_frac"]),
+            float(g["servo_span_frac"]), float(mac)]
+    margins = [float(am.static_margin(*args, s, *tail)) for s in (0.0, 20.0, 40.0)]
+    assert margins[0] < margins[1] < margins[2]
+
+
+def test_camber_raises_cl_max_and_lowers_stall_speed():
+    """Camber's entire payoff.  If Cl_max stops depending on camber, the camber
+    variables become invisible to the objective and the optimizer returns
+    whatever the random start held -- the failure this model documents for motor
+    position."""
+    flat = float(am.max_lift_coefficient(0.0, 0.085, 40000.0))
+    cambered = float(am.max_lift_coefficient(0.03, 0.085, 40000.0))
+    assert cambered > flat
+
+    i1 = am.DESIGN_VARS.index("camber_a1")
+    d_stall = jax.grad(am.stall_only)(am.BASELINE)
+    assert float(d_stall[i1]) < 0.0     # more camber, lower stall speed
+
+
+def test_trim_consumes_control_throw():
+    """Trim is paid for out of the elevon's travel.  If delta_max stops netting
+    out the trim deflection, the model credits the design with authority it has
+    already spent, which is the coupling this whole section exists to add."""
+    r = am.evaluate(am.BASELINE)
+    assert float(r["delta_geom_net"]) <= float(r["delta_geom"]) + 1e-12
+    assert float(r["delta_max"]) <= float(r["delta_geom_net"]) + 1e-12
+
+
+def test_cost_gradient_is_finite_across_the_box():
+    """Camber and balance added arccos, log, and a division by a moment slope,
+    each of which can produce a NaN that poisons the whole gradient vector
+    rather than just its own entry."""
+    lower, upper = ao._bounds_arrays()
+    grad = jax.grad(am.cost)
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        x = lower + frac * (upper - lower)
+        assert bool(jnp.all(jnp.isfinite(grad(x)))), f"non-finite gradient at {frac}"

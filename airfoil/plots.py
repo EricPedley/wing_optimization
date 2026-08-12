@@ -45,15 +45,22 @@ def default_design():
     return am.BASELINE if x is None else x
 
 
-def _section_outline(chord, max_thickness, n=80):
-    """Upper and lower surface of the schematic section, in metres.
+def _section_outline(chord, max_thickness, a1=0.0, a2=0.0, n=80):
+    """Upper and lower surface of the section, in metres.
 
-    Symmetric about the chord line: camber is not chosen yet, and the packaging
-    question this drawing answers does not depend on it.
+    Thickness is distributed about the camber line rather than about the chord
+    line, which is how a real section is built and the reason this returns two
+    independent surfaces instead of one half-thickness to mirror.
+
+    The camber line itself is returned too, because it is what the packaging
+    drawing actually wants: the battery and the servo sit in the section's
+    interior, so what matters is the depth available *between the surfaces* at a
+    station, not the distance from either one to the chord.
     """
     x = np.linspace(0.0, 1.0, n)
     half = 0.5 * np.asarray(am.thickness_at(x, max_thickness))
-    return x * chord, half
+    camber = np.asarray(am.camber_line(x, a1, a2)) * chord
+    return x * chord, camber + half, camber - half, camber
 
 
 def planform_figure(p=None):
@@ -117,6 +124,25 @@ def planform_figure(p=None):
         y=np.array([le_at(y) + 0.25 * chord_at(y) for y in ys]) * 1e3,
         mode="lines", line={"color": "orange", "width": 1, "dash": "dashdot"},
         name=f"c/4 ({float(r['c4_sweep_deg']):+.1f} deg)", hoverinfo="skip",
+    ))
+
+    # Centre of gravity and aerodynamic centre, and the gap between them.  This
+    # is the pair that decides whether the aircraft is stable in pitch at all,
+    # and it is worth drawing rather than only reporting because the reason the
+    # gap is what it is -- sweep dragging the aerodynamic centre aft faster than
+    # it drags the mass -- is a geometric fact that a number does not show.
+    x_cg = float(r["cg_station"])
+    x_ac = float(r["ac_station"])
+    sm = float(r["static_margin"])
+    fig.add_trace(go.Scatter(
+        x=[0.0], y=[x_cg * 1e3], mode="markers",
+        marker={"color": "blue", "size": 12, "symbol": "circle-cross"},
+        name=f"CG ({x_cg * 1e3:.0f} mm)",
+    ))
+    fig.add_trace(go.Scatter(
+        x=[0.0], y=[x_ac * 1e3], mode="markers",
+        marker={"color": "purple", "size": 11, "symbol": "diamond"},
+        name=f"AC ({x_ac * 1e3:.0f} mm),  SM {sm * 100:+.1f}%",
     ))
 
     # Hinge line, drawn only across the elevon span where it exists.
@@ -249,15 +275,32 @@ def section_figure(p=None):
     # mean aerodynamic chord, and the fraction varies along the span.
     x_hinge = float(am.hinge_fraction_at(chord, float(g["x_hinge"]), mac))
 
-    xs, half = _section_outline(chord, thick)
+    xs, upper, lower, camber = _section_outline(
+        chord, thick, float(g["camber_a1"]), float(g["camber_a2"]))
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=np.concatenate([xs, xs[::-1]]) * 1e3,
-        y=np.concatenate([half, -half[::-1]]) * 1e3,
+        y=np.concatenate([upper, lower[::-1]]) * 1e3,
         fill="toself", fillcolor="rgba(200,200,200,0.35)",
         line={"color": "black", "width": 2},
         name="Section", hoverinfo="skip",
+    ))
+
+    # The camber line, which is the whole shape story: whether it rises and
+    # falls once (ordinary camber, nose-down moment) or turns back up near the
+    # trailing edge (reflex, which is what trims a tailless wing).  Drawn
+    # against the chord line so the reflex is visible as a crossing rather than
+    # having to be inferred from the surfaces.
+    fig.add_trace(go.Scatter(
+        x=xs * 1e3, y=camber * 1e3,
+        mode="lines", line={"color": "black", "width": 1, "dash": "dot"},
+        name=f"Camber ({float(r['camber']) * 100:.1f}%)", hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=np.array([0.0, chord]) * 1e3, y=np.array([0.0, 0.0]),
+        mode="lines", line={"color": "gray", "width": 1},
+        name="Chord", hoverinfo="skip",
     ))
 
     # Battery, drawn at its own depth rather than the section's, so the gap
@@ -301,11 +344,14 @@ def section_figure(p=None):
         name="Pushrod", hoverinfo="skip",
     ))
 
-    # Hinge line through the full local thickness.
+    # Hinge line through the full local thickness, centred on the camber line
+    # rather than on the chord, since that is where the section actually is.
     h_half = float(am.thickness_at(x_hinge, thick)) * 0.5
+    h_mid = float(am.camber_line(x_hinge, float(g["camber_a1"]),
+                                 float(g["camber_a2"]))) * chord
     fig.add_trace(go.Scatter(
         x=np.array([x_hinge * chord, x_hinge * chord]) * 1e3,
-        y=np.array([-h_half, h_half]) * 1e3,
+        y=np.array([h_mid - h_half, h_mid + h_half]) * 1e3,
         mode="lines+markers", line={"color": "red", "width": 2, "dash": "dash"},
         marker={"color": "red", "size": 6}, name="Hinge",
     ))
@@ -314,6 +360,8 @@ def section_figure(p=None):
     fig.update_layout(
         title=(f"Root section  --  {chord * 1e3:.0f} mm chord,"
                f" {float(r['root_tc']) * 100:.1f}% thick,"
+               f" {float(r['camber']) * 100:.1f}% camber,"
+               f" Cm0 {float(r['cm_c4']):+.3f},"
                f" slack {slack:+.1f} mm"),
         xaxis={"title": "chord, mm"},
         yaxis={"title": "thickness, mm", "scaleanchor": "x", "scaleratio": 1},

@@ -57,9 +57,59 @@ G = 9.81             # m/s^2
 # downstream of THRUST_PER_MOTOR should be treated as provisional until it is.
 
 SPAN = 0.256                 # m, capped by the 3D printer bed
-FIXED_MASS = 0.025           # kg, FC + RX + battery + servos + motors + ESC + props
 THRUST_PER_MOTOR = 0.035     # kgf, ~35 g.  UNMEASURED -- see note above.
 PROP_DIAMETER = 0.051        # m, 2 inch
+
+# --- Mass breakdown -----------------------------------------------------------
+#
+# These used to be a single lumped FIXED_MASS of 25 g, which was enough while
+# nothing asked *where* the mass sat.  The centre of gravity does ask, and the
+# answer decides whether the aircraft is stable in pitch at all, so the lump is
+# split into items with chordwise stations.  The sum is still 25 g -- the split
+# reapportions the same mass rather than changing it, so thrust-to-weight and
+# stall speed are untouched by this refactor and any movement in them is a real
+# consequence of the geometry rather than an accounting change.
+#
+# The split is estimated, not weighed.  Motors and props dominate the forward
+# group and the battery the aft, which is the part that matters for the CG; the
+# avionics are small and near the middle where their exact station matters least.
+BATTERY_MASS = 0.008         # kg, the 1S cell
+MOTOR_MASS = 0.0075          # kg, both motors with their props and mounts
+AVIONICS_MASS = 0.0055       # kg, FC + RX + ESC + wiring, near the centre
+SERVO_MASS = 0.004           # kg, both servos
+
+FIXED_MASS = BATTERY_MASS + MOTOR_MASS + AVIONICS_MASS + SERVO_MASS  # kg
+
+# Chord fraction where the avionics stack sits.  Small and centrally placed, so
+# this is a weak lever on the CG compared with the battery and the motors; it is
+# named rather than buried so the CG sum reads as a complete accounting.
+AVIONICS_STATION = 0.35
+
+# --- Motor mounting geometry --------------------------------------------------
+#
+# The motor station is derived rather than chosen, because it is not free: the
+# prop has to clear the leading edge, and that clearance plus the motor's own
+# length is the whole of it.
+#
+# Working aft from the prop disk:
+#
+#   * the prop tip sweeps a circle of radius PROP_DIAMETER/2 about the shaft, so
+#     the leading edge must sit at least that far aft of the disk plus a margin,
+#     or the blade strikes the wing;
+#   * the motor body occupies MOTOR_BODY_LENGTH between the disk and its mount
+#     face;
+#   * the mount face itself has to stand proud of the leading edge by
+#     MOTOR_MOUNT_STANDOFF so it is a flat pad rather than a knife edge.
+#
+# The motor's mass centre sits about halfway along its body, which is what the
+# CG calculation wants, and that lands *ahead* of the leading edge -- a negative
+# chord station.  That is the point: the motors are the only significant mass
+# forward of the wing, and they are what makes a tailless layout balance.
+MOTOR_BODY_LENGTH = 0.004    # m, disk plane to mount face, 4 mm
+MOTOR_MOUNT_STANDOFF = 0.003  # m, mount pad proud of the leading edge
+# Radial gap between the prop tip circle and the leading edge.  Not zero: the
+# blade flexes under load and the wing is not a perfect surface.
+PROP_TIP_CLEARANCE = 0.004   # m
 
 BATTERY_LENGTH = 0.065       # m, drives the minimum root chord
 BATTERY_THICKNESS = 0.011    # m, depth the section must provide where it sits
@@ -209,6 +259,27 @@ SLIPSTREAM_WIDTH_FACTOR = 1.0
 
 ARCCOS_EPS = 1e-9
 
+# Cl_max correlation.  See max_lift_coefficient for what these mean and how far
+# they should be trusted, which is not very far: the base value is the flat-plate
+# figure this model used as a constant before camber existed, and the gains are
+# representative of published low-Reynolds-number section data rather than fitted
+# to any particular one.
+#
+# CL_MAX_CAMBER_GAIN is the important one.  At 2% camber it adds about 0.16 to
+# Cl_max, which is roughly a 10% reduction in stall speed -- enough that camber
+# is worth having, not so much that it overwhelms the trim cost that pays for it.
+# If this number is badly wrong, the balance between camber and reflex is wrong
+# with it, which is the first thing to check if the optimum looks strange.
+CL_MAX_BASE = 0.80
+CL_MAX_CAMBER_GAIN = 8.0     # per unit camber/chord
+CL_MAX_TC_GAIN = 1.5         # per unit thickness ratio, about the reference
+CL_MAX_TC_REF = 0.085        # t/c where the band is happiest
+CL_MAX_RE_GAIN = 0.12        # per e-fold of Reynolds number
+CL_MAX_RE_REF = 40000.0      # the Reynolds number this wing actually flies at
+# Nothing at this Reynolds number reaches a Cl_max like this; the ceiling exists
+# so an optimizer probing absurd camber cannot buy unlimited stall speed.
+CL_MAX_CEILING = 1.35
+
 
 # --- Thin-airfoil flap theory -------------------------------------------------
 #
@@ -282,6 +353,115 @@ def effective_flap_moment_slope(x_hinge, deflection_deg):
     return (flap_moment_slope(x_hinge)
             * FLAP_EFFECTIVENESS_FACTOR
             * flap_deflection_efficiency(deflection_deg))
+
+
+# --- Camber -------------------------------------------------------------------
+#
+# The camber line is parameterized by its Birnbaum-Glauert coefficients A1 and
+# A2 rather than by a geometric shape, which is worth explaining because it is
+# the unusual choice.
+#
+# Thin-airfoil theory only ever sees the camber line through the first three
+# coefficients of the Fourier series for its slope:
+#
+#     dz/dx(theta) = A0' + A1 cos(theta) + A2 cos(2 theta) + ...
+#     Cl      = 2 pi (alpha - alpha_L0)
+#     Cm_c/4  = (pi / 4) (A2 - A1)
+#
+# Everything past A2 changes the shape without changing either the lift or the
+# moment, so a parameterization carrying more terms would hand the optimizer
+# variables the objective cannot see -- exactly the failure documented at
+# yaw_moment, where a flat cost returns whatever the random start held.
+#
+# Parameterizing by A1 and A2 directly has a second payoff.  Reflex -- the
+# trailing-edge upsweep a tailless wing uses to trim itself -- is the condition
+# Cm_c/4 = 0, which in these coordinates is exactly A2 = A1.  As a geometric
+# shape, say a NACA 5-digit reflexed section, the same condition is a root-solve
+# against fitted table constants that are not differentiable in the design
+# variable.  Here it is algebra, and the gradient is exact.
+#
+# The cost is that the design variables are no longer directly meaningful to
+# look at, which is what camber_line and camber_max exist to undo.
+
+
+def camber_slope(x, a1, a2):
+    """dz/dx of the camber line at chord fraction ``x``.
+
+    The A0' term is omitted deliberately: it is a uniform incidence of the whole
+    camber line, which is indistinguishable from flying at a different angle of
+    attack and would double-count against alpha.  What is left is the shape.
+    """
+    theta = hinge_angle(x)
+    return a1 * jnp.cos(theta) + a2 * jnp.cos(2.0 * theta)
+
+
+def camber_line(x, a1, a2):
+    """Camber line height z/c at chord fraction ``x``.
+
+    Integrated from the slope in the theta variable, where the integral is
+    closed form.  With x = (1 - cos theta)/2, dx = (sin theta / 2) dtheta,
+
+        z(theta) = integral from 0 to theta of (A1 cos u + A2 cos 2u)(sin u / 2) du
+                 = A1 sin^2(theta) / 4
+                 + A2 (-cos^3(theta)/3 + cos(theta)/2 - 1/6)
+
+    The A1 term closes on its own -- it is zero at both ends -- but the A2 term
+    is not: it reaches -A2/3 at the trailing edge.  That is not an algebra slip
+    but a real property of the series, and it means the raw integral describes a
+    line whose endpoints do not both lie on the chord line.
+
+    Subtracting the linear ramp that joins those endpoints is what makes this a
+    camber line *measured from the chord*, which is the definition every other
+    quantity here assumes.  Geometrically the ramp is a uniform rotation of the
+    section, indistinguishable from flying at a different angle of attack, so
+    removing it here and letting alpha carry it is the same bookkeeping choice
+    that drops the A0' term in camber_slope.  Neither Cl nor Cm_c/4 is affected.
+    """
+    theta = hinge_angle(x)
+    term_a1 = a1 * jnp.sin(theta) ** 2 / 4.0
+    cos_t = jnp.cos(theta)
+    term_a2 = a2 * (-cos_t ** 3 / 3.0 + cos_t / 2.0 - 1.0 / 6.0)
+    # Re-reference to the straight line from the leading to the trailing edge.
+    # Only the A2 term has anything to remove; x is the fraction along it.
+    return term_a1 + term_a2 + a2 * x / 3.0
+
+
+def alpha_zero_lift(a1, a2):
+    """Zero-lift angle of attack, in radians.
+
+    Negative for a conventionally cambered section: it already makes lift at
+    zero incidence, so it reaches zero lift only when pitched nose-down.  This
+    is why a cambered wing cruises at a lower angle of attack than a symmetric
+    one of the same area, which shows up downstream as a slightly smaller hinge
+    moment.
+    """
+    return -0.5 * a1
+
+
+def cm_quarter_chord(a1, a2):
+    """Section pitching moment about the quarter chord.  Inviscid.
+
+    Independent of angle of attack -- that is what makes the quarter chord the
+    aerodynamic centre -- so this is the constant the wing has to trim against.
+    Negative (nose-down) for ordinary camber, zero when A2 = A1, and positive
+    for reflex, which is the whole reason reflex exists.
+    """
+    return 0.25 * jnp.pi * (a2 - a1)
+
+
+def camber_max(a1, a2, n=41):
+    """Largest |z|/c on the camber line, and the station where it occurs.
+
+    Sampled rather than solved: the extremum of a two-term series has a closed
+    form, but it involves a case split on which term dominates, and a split is a
+    discontinuity the optimizer would feel.  A fixed grid is smooth in the
+    coefficients, which matters more here than the last fraction of a percent of
+    accuracy, since this feeds an already-approximate Cl_max correlation.
+    """
+    x = jnp.linspace(0.0, 1.0, n)
+    z = camber_line(x, a1, a2)
+    k = jnp.argmax(jnp.abs(z))
+    return jnp.abs(z[k]), x[k]
 
 
 # --- Propeller slipstream -----------------------------------------------------
@@ -614,6 +794,223 @@ def total_mass(root_chord, tip_chord, root_thickness, tip_thickness):
             + FIXED_MASS)
 
 
+# --- Balance ------------------------------------------------------------------
+#
+# Everything in this section measures chordwise position aft of the *root*
+# leading edge, in metres.  That origin is arbitrary but it has to be stated,
+# because the centre of gravity and the aerodynamic centre are only meaningful
+# relative to each other and a sign error between them inverts the stability
+# conclusion.  Aft is positive throughout.
+
+
+def motor_station():
+    """Chordwise position of the motor mass centre, in m aft of the root LE.
+
+    Derived from the prop rather than chosen.  Working forward from the leading
+    edge: the mount pad stands proud by MOTOR_MOUNT_STANDOFF, the motor body
+    occupies MOTOR_BODY_LENGTH ahead of that, and the prop disk sits at its
+    front.  The mass centre is taken at the middle of the body.
+
+    The result is negative -- the motors sit ahead of the wing -- which is the
+    entire reason a tailless aircraft with the battery inside the wing can
+    balance at all.
+
+    Prop tip clearance is checked separately in :func:`prop_clearance_slack`
+    rather than folded in here, because it constrains how far *outboard* the
+    motor must sit for the blade to miss the leading edge, which is a different
+    question from where the motor's mass acts.
+    """
+    return -(MOTOR_MOUNT_STANDOFF + 0.5 * MOTOR_BODY_LENGTH)
+
+
+def prop_clearance_slack(le_sweep_deg, motor_y):
+    """Gap between the prop tip circle and the leading edge, in m.
+
+    The prop is a disk of radius PROP_DIAMETER/2 standing ahead of the wing on
+    a mount MOTOR_MOUNT_STANDOFF proud of the leading edge.  Its blade sweeps
+    inboard as well as outboard, so the tip passes closest to the wing on the
+    inboard side, where the leading edge is further forward than at the motor's
+    own station because of sweep.
+
+    Positive means the blade clears.  This is what stops the optimizer from
+    sliding the motors inboard for packaging reasons until the props would
+    strike the wing -- a constraint that did not exist while the motor station
+    was not modelled at all.
+    """
+    semi = 0.5 * SPAN
+    tip_radius = 0.5 * PROP_DIAMETER
+
+    # Where the blade tip passes on the inboard side, and how far aft the
+    # leading edge has fallen back by the motor's own station.  With aft sweep
+    # the inboard leading edge is *forward* of the motor's, so the gap closes.
+    inboard_y = jnp.maximum(motor_y - tip_radius, 0.0)
+    le_at_motor = leading_edge_x(motor_y / semi, le_sweep_deg)
+    le_at_inboard = leading_edge_x(inboard_y / semi, le_sweep_deg)
+
+    # The mount pad is at the leading edge of the motor's own station, so the
+    # disk plane sits that far forward; the blade tip sweeps back to the
+    # inboard leading edge, which is further forward by this much.
+    sweep_encroachment = le_at_motor - le_at_inboard
+    return MOTOR_MOUNT_STANDOFF + sweep_encroachment - PROP_TIP_CLEARANCE
+
+
+def wing_centroid_x(root_chord, tip_chord, le_sweep_deg):
+    """Chordwise centroid of the wing skin, in m aft of the root LE.
+
+    The skin is a lamina of uniform areal density, so its centroid is the
+    area-weighted mean of each station's own mid-chord.  Split into the
+    constant-chord centre strip and the tapered panel, matching :func:`planform`
+    so the two cannot disagree about what the wing is.
+
+    Sweep enters here and nowhere else in the mass accounting, which is what
+    makes le_sweep_deg finally cost something: sweeping the wing aft drags the
+    skin centroid aft with it, moving the CG toward the aerodynamic centre and
+    eating the static margin that the same sweep was meant to buy.
+    """
+    f0 = root_section_fraction()
+    semi = 0.5 * SPAN
+    span_root = f0 * semi
+    span_taper = (1.0 - f0) * semi
+
+    # Centre strip: a rectangle, unswept, so its centroid is at half the root
+    # chord and its area is chord times span.
+    area_root = root_chord * span_root
+    x_root = 0.5 * root_chord
+
+    # Tapered panel: integrate c(y) * (le(y) + c(y)/2) over the panel and divide
+    # by its area.  Both c and le are linear in y there, so a three-point
+    # Simpson rule is exact for the quadratic integrand and avoids writing out
+    # an algebraic expression that would have to be re-derived if the loft
+    # changed.
+    def panel_integrand(t):
+        # t is the taper fraction, 0 at the strip edge and 1 at the tip.
+        span_fraction = f0 + t * (1.0 - f0)
+        chord = root_chord + (tip_chord - root_chord) * t
+        le = leading_edge_x(span_fraction, le_sweep_deg)
+        return chord, chord * (le + 0.5 * chord)
+
+    c0, m0 = panel_integrand(0.0)
+    c1, m1 = panel_integrand(0.5)
+    c2, m2 = panel_integrand(1.0)
+    simpson = lambda a, b, c: (a + 4.0 * b + c) / 6.0
+    area_taper = simpson(c0, c1, c2) * span_taper
+    moment_taper = simpson(m0, m1, m2) * span_taper
+
+    total_area = area_root + area_taper
+    moment = area_root * x_root + moment_taper
+    return moment / jnp.maximum(total_area, 1e-12)
+
+
+def cg_station(root_chord, tip_chord, root_thickness, tip_thickness,
+               le_sweep_deg, battery_station, servo_chord_frac,
+               servo_span_frac):
+    """Centre of gravity, in m aft of the root leading edge.
+
+    A mass-weighted sum over every item the aircraft is made of.  The wing skin
+    and the battery dominate and pull aft; the motors are the only thing pulling
+    forward, and they do it with a short arm and a small mass, which is why the
+    battery station ends up being the strongest lever the optimizer has on
+    balance.
+
+    The servos are placed at their own spanwise station's leading edge plus
+    their chordwise fraction, so moving them fore and aft moves the CG the way
+    it really would.  It is a small term -- 4 g against 42 -- but it is free to
+    include and it stops servo_chord_frac from being decided purely by
+    packaging.
+    """
+    semi = 0.5 * SPAN
+
+    w_mass = wing_mass(root_chord, tip_chord, root_thickness, tip_thickness)
+    x_wing = wing_centroid_x(root_chord, tip_chord, le_sweep_deg)
+
+    # Battery: a box on the centreline whose forward face is at its station, so
+    # its mass acts half its own length aft of that.
+    x_battery = battery_station * root_chord + 0.5 * BATTERY_LENGTH
+
+    # Servos: at their own section, which is swept aft of the root.
+    servo_chord, _ = local_geometry(root_chord, tip_chord, root_thickness,
+                                    tip_thickness, servo_span_frac)
+    x_servo = (leading_edge_x(servo_span_frac, le_sweep_deg)
+               + servo_chord_frac * servo_chord)
+
+    # Avionics: near the centreline at a fixed fraction of the root chord.
+    x_avionics = AVIONICS_STATION * root_chord
+
+    # Motors: ahead of the leading edge, hence negative.  Their own station is
+    # swept aft with the wing, so the sweep does not buy as much forward arm as
+    # the bare standoff suggests.
+    x_motor = leading_edge_x(0.0, le_sweep_deg) + motor_station()
+
+    mass = w_mass + FIXED_MASS
+    moment = (w_mass * x_wing
+              + BATTERY_MASS * x_battery
+              + SERVO_MASS * x_servo
+              + AVIONICS_MASS * x_avionics
+              + MOTOR_MASS * x_motor)
+    return moment / jnp.maximum(mass, 1e-12)
+
+
+def aerodynamic_centre_x(root_chord, tip_chord, le_sweep_deg):
+    """Wing aerodynamic centre, in m aft of the root leading edge.
+
+    The area-weighted mean of each station's own quarter chord, which is where
+    thin-airfoil theory puts the section aerodynamic centre.  For a straight
+    tapered wing this is the standard construction and is good to a few percent
+    against lifting-line at this aspect ratio.
+
+    What it does *not* include is the aft shift with Mach number (irrelevant
+    here) or the small forward shift from a very low aspect ratio.  The latter
+    is real at AR 2.5 but it is smaller than the uncertainty already carried by
+    the Cl_max correlation, and including it would imply a precision the rest of
+    the model does not have.
+    """
+    f0 = root_section_fraction()
+    span_root = f0 * 0.5 * SPAN
+    span_taper = (1.0 - f0) * 0.5 * SPAN
+
+    area_root = root_chord * span_root
+    x_root = 0.25 * root_chord
+
+    def panel_integrand(t):
+        span_fraction = f0 + t * (1.0 - f0)
+        chord = root_chord + (tip_chord - root_chord) * t
+        le = leading_edge_x(span_fraction, le_sweep_deg)
+        return chord, chord * (le + 0.25 * chord)
+
+    c0, m0 = panel_integrand(0.0)
+    c1, m1 = panel_integrand(0.5)
+    c2, m2 = panel_integrand(1.0)
+    simpson = lambda a, b, c: (a + 4.0 * b + c) / 6.0
+    area_taper = simpson(c0, c1, c2) * span_taper
+    moment_taper = simpson(m0, m1, m2) * span_taper
+
+    total_area = area_root + area_taper
+    moment = area_root * x_root + moment_taper
+    return moment / jnp.maximum(total_area, 1e-12)
+
+
+def static_margin(root_chord, tip_chord, root_thickness, tip_thickness,
+                  le_sweep_deg, battery_station, servo_chord_frac,
+                  servo_span_frac, mac):
+    """Static margin, as a fraction of the mean aerodynamic chord.
+
+    Positive means the centre of gravity is ahead of the aerodynamic centre,
+    which is the condition for pitch stability: a gust that raises the nose
+    raises the lift, and lift acting behind the CG pitches the nose back down.
+    Negative means the aircraft diverges in pitch and has to be flown by a
+    controller fast enough to catch it, which is not what this airframe is.
+
+    This is the number that finally prices le_sweep_deg.  Until now nothing in
+    the objective could see sweep at all -- it was documented as a variable the
+    optimizer would leave wherever it started.
+    """
+    x_cg = cg_station(root_chord, tip_chord, root_thickness, tip_thickness,
+                      le_sweep_deg, battery_station, servo_chord_frac,
+                      servo_span_frac)
+    x_ac = aerodynamic_centre_x(root_chord, tip_chord, le_sweep_deg)
+    return (x_ac - x_cg) / jnp.maximum(mac, 1e-9)
+
+
 def thickness_at(x, max_thickness):
     """Section thickness at chord fraction ``x``, given the maximum thickness.
 
@@ -792,6 +1189,107 @@ def cruise_lift_coefficient(mass_kg, area, v_inf):
     return 2.0 * weight / (RHO * jnp.maximum(v_inf ** 2, 1e-9) * area)
 
 
+def max_lift_coefficient(camber, thickness_ratio, re):
+    """Cl_max of the section, from an empirical correlation.
+
+    This used to be a constant passed in as 0.8, which was defensible while
+    nothing in the design could change it.  Camber can, and camber's entire
+    payoff is here -- a cambered section reaches a higher Cl before it stalls,
+    which is what lets the wing fly slower.  Leaving Cl_max constant while
+    adding camber as a design variable would have made camber pure cost with no
+    benefit, and the optimizer would have driven it to zero for the wrong
+    reason.
+
+    The correlation is deliberately crude and its form matters more than its
+    coefficients:
+
+      * camber helps, strongly, and it is the dominant term at this scale;
+      * thickness helps a little near 8-9% and the band is already constrained
+        elsewhere, so a linear term about a reference is enough;
+      * Reynolds number helps logarithmically, which is the standard way the
+        low-Re literature reports it.
+
+    At Re ~ 40,000 none of this is better than +/- 0.15 absolute, and it is the
+    single largest uncertainty in the stall speed the optimizer minimizes.  It
+    is an imported bound of the same character as MIN_THICKNESS_RATIO: a
+    statement about what published section data shows, not something this model
+    derives.  Do not read the second decimal place.
+    """
+    cl = (CL_MAX_BASE
+          + CL_MAX_CAMBER_GAIN * camber
+          + CL_MAX_TC_GAIN * (thickness_ratio - CL_MAX_TC_REF)
+          + CL_MAX_RE_GAIN * jnp.log(jnp.maximum(re, 1e3) / CL_MAX_RE_REF))
+    # Floored well below anything the correlation should produce, purely so a
+    # design the optimizer probes on its way somewhere else cannot return a
+    # negative Cl_max and a NaN stall speed.
+    return jnp.clip(cl, 0.2, CL_MAX_CEILING)
+
+
+# --- Trim ---------------------------------------------------------------------
+#
+# A tailless aircraft has no separate surface to trim with, so the elevons do it
+# and whatever they spend on trim is no longer available for control.  That is
+# the coupling this section exists to make visible: before it, camber and sweep
+# were free, and the elevon's whole throw was assumed available for manoeuvring.
+
+
+def trim_deflection_deg(cm_c4, cl_cruise, margin, x_hinge, iterations=2):
+    """Elevon deflection needed to trim in cruise, in degrees.
+
+    Moment balance about the centre of gravity:
+
+        Cm_cg = Cm_c/4 - Cl * static_margin + dCm/deta * eta = 0
+
+    The middle term is the moment from carrying the lift behind the centre of
+    gravity, which is what a positive static margin means.  It is *negative* --
+    nose-down -- because lift acting aft of the CG pitches the nose down, and
+    that sign is the whole reason a stable tailless wing needs up elevon to trim
+    rather than down.  Getting it backwards inverts the trim direction, makes a
+    stable aircraft appear to need down elevon, and rewards exactly the wrong
+    camber; it is the single easiest sign to get wrong in this file.
+
+    Strictly this is implicit, because dCm/deta depends on the deflection
+    through the stall roll-off.  Rather than call a solver, it is iterated from
+    zero a fixed number of times: below FLAP_STALL_DEG the roll-off is unity and
+    the first pass is already exact, and above it the map is a strong
+    contraction, so two passes are well converged.  A fixed number of passes
+    also keeps the function trivially differentiable, which a while-loop would
+    not -- and this quantity is differentiated twice over in ``sensitivity``.
+
+    A positive result means trailing edge down.  A stable, cambered wing needs
+    *up* elevon to trim, so the usual answer here is negative.
+    """
+    eta = 0.0
+    for _ in range(iterations):
+        dcm = effective_flap_moment_slope(x_hinge, eta)
+        eta = -(cm_c4 - cl_cruise * margin) / jnp.where(
+            jnp.abs(dcm) < 1e-9, 1e-9, dcm)
+        eta = jnp.degrees(eta)
+        # The balance is written per radian but reported in degrees, so convert
+        # once here and feed the degree value back in, which is what the
+        # roll-off expects.
+        eta = jnp.clip(eta, -FLAP_SATURATION_DEG, FLAP_SATURATION_DEG)
+    return eta
+
+
+def trim_alpha_deg(cl_cruise, a1, a2):
+    """Angle of attack in trimmed cruise, in degrees.
+
+    Thin-airfoil lift-curve slope from the zero-lift angle the camber sets.  A
+    cambered wing flies at a lower alpha for the same Cl, which slightly reduces
+    the hinge moment -- a real second-order benefit of camber that the model
+    would otherwise miss, since ``hinge_moment`` takes alpha as an argument and
+    was previously always given zero.
+
+    No aspect-ratio correction to the lift-curve slope.  At AR 2.8 the real
+    slope is meaningfully below 2 pi, so this understates alpha; it is left
+    simple because alpha enters only the hinge-moment correction, where the
+    coefficient it multiplies is itself a representative value rather than a
+    measured one.
+    """
+    return jnp.degrees(cl_cruise / (2.0 * jnp.pi) + alpha_zero_lift(a1, a2))
+
+
 # --- Inertia and angular acceleration -----------------------------------------
 #
 # A control moment in N.m says nothing on its own about whether the aircraft
@@ -841,6 +1339,11 @@ def angular_acceleration(moment, inertia_value):
 DESIGN_VARS = ["root_chord", "tip_chord", "root_thickness", "tip_thickness",
                "x_hinge", "elevon_inboard_frac", "motor_frac", "servo_chord_frac",
                "servo_span_frac", "le_sweep_deg", "battery_station",
+               # Camber, as Birnbaum-Glauert coefficients rather than as a
+               # geometric shape.  See the camber section for why: reflex is
+               # exactly A2 = A1 in these coordinates, and everything past A2
+               # would be invisible to both lift and moment.
+               "camber_a1", "camber_a2",
                # Linkage geometry, in millimetres.  See airfoil.linkage_coupling
                # for why these live in the same vector as the wing: the servo's
                # stroke is a fixed budget spent on torque or throw, and only the
@@ -885,6 +1388,8 @@ def unpack(p):
         "servo_chord": servo_chord,
         "servo_thickness": servo_thickness,
         "le_sweep_deg": v["le_sweep_deg"],
+        "camber_a1": v["camber_a1"],
+        "camber_a2": v["camber_a2"],
         # Linkage, millimetres, passed through untouched.  servo_height is the
         # rail's offset perpendicular to the hinge axis, which is a different
         # axis from servo_y above -- see airfoil.linkage_coupling.
@@ -922,7 +1427,7 @@ def required_deflection_deg(unit_alpha, floor):
     return floor / jnp.maximum(jnp.abs(unit_alpha), 1e-9)
 
 
-def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
+def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
     """Everything the elevon sizing decision needs, at one design point.
 
     Authority is reported at four conditions because the binding one is not
@@ -937,14 +1442,53 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
     front.  An explicit value is still honoured, because the plots and the
     roll-off table need to ask what would happen at a deflection this design
     does not actually use.
+
+    ``cl_max`` of None means the same thing for the same reason: it is derived
+    from the camber, thickness, and Reynolds number the design actually has.  It
+    used to be a constant 0.8 passed in from outside, which was the only honest
+    choice while nothing in the design could move it, and is now the override
+    rather than the default.
     """
     g = unpack(p)
     area, mac = planform(g["root_chord"], g["tip_chord"])
     mass = total_mass(g["root_chord"], g["tip_chord"],
                       g["root_thickness"], g["tip_thickness"])
 
+    camber, camber_x = camber_max(g["camber_a1"], g["camber_a2"])
+    cm_c4 = cm_quarter_chord(g["camber_a1"], g["camber_a2"])
+
+    # Cl_max, and with it the stall speed, now depends on the design.  There is
+    # a circularity to break: Cl_max wants the Reynolds number, which wants the
+    # stall speed, which wants Cl_max.  Broken by evaluating Reynolds at the
+    # stall speed the *base* Cl_max implies, which is within a few percent and
+    # feeds a correlation whose logarithmic Reynolds term is far less sensitive
+    # than that.
+    if cl_max is None:
+        v_stall_seed = stall_speed(mass, area, CL_MAX_BASE)
+        tc_mean = 0.5 * (g["root_thickness"] / jnp.maximum(g["root_chord"], 1e-9)
+                         + g["tip_thickness"] / jnp.maximum(g["tip_chord"], 1e-9))
+        # At the mean aerodynamic chord and at the tip, taking the worse.  The
+        # tip runs at a lower Reynolds number and stalls first, and tip stall on
+        # a swept tailless wing is the departure mode that actually hurts.
+        cl_max = jnp.minimum(
+            max_lift_coefficient(camber, tc_mean, reynolds(v_stall_seed, mac)),
+            max_lift_coefficient(camber, g["tip_thickness"]
+                                 / jnp.maximum(g["tip_chord"], 1e-9),
+                                 reynolds(v_stall_seed, g["tip_chord"])))
+
     thrust_hover = THRUST_PER_MOTOR * G
     v_stall = stall_speed(mass, area, cl_max)
+
+    # Balance, and the trim the balance demands.  Cruise is the trim condition:
+    # it is where the aircraft spends its time and where the freestream, rather
+    # than the prop wash, is what the elevon has to work against.
+    margin = static_margin(
+        g["root_chord"], g["tip_chord"], g["root_thickness"],
+        g["tip_thickness"], g["le_sweep_deg"], g["battery_station"],
+        g["servo_chord_frac"], g["servo_span_frac"], mac)
+    cl_cruise = cruise_lift_coefficient(mass, area, v_cruise)
+    eta_trim = trim_deflection_deg(cm_c4, cl_cruise, margin, g["x_hinge"])
+    alpha_trim = trim_alpha_deg(cl_cruise, g["camber_a1"], g["camber_a2"])
 
     # Thrust required in cruise is a small fraction of hover thrust, so the
     # wash contribution there is correspondingly weaker.
@@ -977,8 +1521,27 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
         g["flap_x_mm"], g["flap_y_mm"])
     advantage = lk["advantage"]
 
+    # Deflection and incidence the elevon already carries before any control
+    # input, which is zero everywhere except in forward flight.  In hover there
+    # is no freestream to trim against and the wing is not making lift, so the
+    # elevon starts from neutral; in cruise and idle descent it starts from the
+    # trim deflection and the section sits at the trim angle of attack.
+    trim_bias = {"hover": 0.0, "transition": 0.5 * eta_trim,
+                 "cruise": eta_trim, "idle_descent": eta_trim}
+    alpha_bias = {"hover": 0.0, "transition": 0.5 * alpha_trim,
+                  "cruise": alpha_trim, "idle_descent": alpha_trim}
+
     def moments(cond, thrust, v, delta_deg):
-        """Control moments at one condition and deflection."""
+        """Control moments at one condition and deflection.
+
+        The hinge moment is taken at the *total* deflection -- trim plus control
+        -- because that is what the servo physically holds, while the control
+        moments are taken at the control deflection alone, because trim by
+        definition produces no net moment.  Conflating the two would have the
+        servo sized for control alone and stalling the moment it is asked to
+        trim as well, which is the failure this whole section exists to catch.
+        """
+        total_deg = delta_deg + trim_bias[cond]
         return (
             pitch_moment(delta_deg, g["x_hinge"], thrust, v, g["motor_y"],
                          g["elevon_inboard_y"], g["elevon_outboard_y"],
@@ -987,8 +1550,9 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
                         g["elevon_inboard_y"], g["elevon_outboard_y"], mac),
             yaw_moment(available_differential_thrust(throttles[cond]),
                        g["motor_y"]),
-            hinge_moment(delta_deg, g["x_hinge"], thrust, v, g["motor_y"],
-                         g["elevon_inboard_y"], g["elevon_outboard_y"], mac),
+            hinge_moment(total_deg, g["x_hinge"], thrust, v, g["motor_y"],
+                         g["elevon_inboard_y"], g["elevon_outboard_y"], mac,
+                         alpha_deg=alpha_bias[cond]),
         )
 
     # --- Derive the deflection, unless one was asked for explicitly.
@@ -1022,7 +1586,13 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
         for v, thrust in conditions.values()])
     unit_force_peak = unit_force * q_peak / jnp.maximum(q_hover, 1e-12)
     delta_force = force_limit / jnp.maximum(unit_force_peak, 1e-12)
-    delta_max = jnp.minimum(lk["delta_max_deg"], delta_force)
+    # What the mechanism can give, less what trim has already spent.  A surface
+    # held at its trim deflection can only travel the rest of the way to its
+    # stop before it runs out, so the throw available for control is the
+    # geometric throw minus the trim bias -- which is exactly how a tailless
+    # aircraft's control authority degrades as it is asked to trim harder.
+    delta_geom_net = jnp.maximum(lk["delta_max_deg"] - jnp.abs(eta_trim), 0.0)
+    delta_max = jnp.minimum(delta_geom_net, delta_force)
 
     if deflection_deg is None:
         deflection_deg = delta_req
@@ -1065,6 +1635,26 @@ def evaluate(p, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
         "delta_req": delta_req,
         "delta_max": delta_max,
         "delta_geom": lk["delta_max_deg"],
+        # Balance and trim.  eta_trim is what cruise costs before any control
+        # input; delta_geom_net is what is left of the mechanism's throw after
+        # paying it.
+        "cl_max": cl_max,
+        "camber": camber,
+        "camber_station": camber_x,
+        "cm_c4": cm_c4,
+        "static_margin": margin,
+        "cg_station": cg_station(
+            g["root_chord"], g["tip_chord"], g["root_thickness"],
+            g["tip_thickness"], g["le_sweep_deg"], g["battery_station"],
+            g["servo_chord_frac"], g["servo_span_frac"]),
+        "ac_station": aerodynamic_centre_x(
+            g["root_chord"], g["tip_chord"], g["le_sweep_deg"]),
+        "cl_cruise": cl_cruise,
+        "eta_trim": eta_trim,
+        "alpha_trim": alpha_trim,
+        "delta_geom_net": delta_geom_net,
+        "prop_clearance": prop_clearance_slack(
+            g["le_sweep_deg"], g["motor_y"]),
         "delta_force": delta_force,
         "delta_req_pitch": required_deflection_deg(
             angular_acceleration(unit_pitch, i_pitch), MIN_ALPHA_PITCH_HOVER),
@@ -1191,6 +1781,28 @@ MIN_ALPHA_ROLL_HOVER = 47.0
 MIN_ALPHA_YAW_CRUISE = 6.5
 MIN_TWR = 1.3
 
+# Static margin floor, as a fraction of the mean aerodynamic chord.
+#
+# 5% is the low end of what is normally built.  A tailless aircraft is usually
+# flown between 5% and 15%: below about 5% the pitch damping is weak enough that
+# a gust response takes a long time to settle, and above about 15% the elevon
+# spends so much of its throw trimming that little is left to manoeuvre with.
+# The floor rather than a target, because the optimizer has every incentive to
+# sit right at it -- margin costs trim deflection, which costs authority.
+#
+# Worth stating plainly: at the geometry this model started from, the static
+# margin is slightly *negative*.  This constraint is what fixes that, and it
+# does so mostly by sweeping the wing further aft.
+MIN_STATIC_MARGIN = 0.05
+
+# Largest trim deflection considered acceptable, in degrees.
+#
+# Trim eats the elevon twice over: once directly, since a surface held at trim
+# has less travel left before its stop, and once through drag, since a
+# permanently deflected surface is a permanently separated one at this Reynolds
+# number.  5 degrees is about where a flying wing stops being efficient.
+MAX_TRIM_DEFLECTION = 5.0
+
 # Reynolds number below which the section data underpinning this model stops
 # meaning much.  Not a hard physical limit, but a statement that the model
 # should not be trusted to rank designs past it.
@@ -1233,6 +1845,37 @@ CONSTRAINT_WEIGHT = 5000.0
 MOTOR_FRAC_PREFERENCE = 1.0
 TIEBREAK_WEIGHT = 1e-4
 
+# Sweep is the same story one step removed, and it is worth being explicit about
+# because the balance model makes it look solved when it is not.
+#
+# Adding the static margin constraint gave sweep something to push against for
+# the first time -- before it, sweep was documented as a variable the optimizer
+# would leave wherever it started.  But the constraint is a *floor*, not a
+# gradient: once the margin clears MIN_STATIC_MARGIN, stall speed does not care
+# how much sweep produced it, so d(stall)/d(sweep) is still exactly zero and any
+# sweep from about 30 degrees upward is rated identically.  The first solve
+# returned 43.9 degrees for that reason, which is not a recommendation, it is the
+# upper end of a flat region.
+#
+# So sweep gets a tie-break toward the *least* that does the job.  Sweep is not
+# free in reality -- it aggravates tip stall, which on a tailless aircraft is a
+# departure rather than a nuisance, and it costs span efficiency -- but none of
+# that is in this model, so the preference is stated as a preference rather than
+# dressed up as an optimum.  Anything past the floor is buying margin the model
+# cannot price with drag it cannot see.
+#
+# The weight is larger than the motor tie-break's because it has more to do.
+# Motor position is flat over a narrow box, while sweep is flat from about 30
+# degrees to the 45-degree bound -- a genuinely wide plateau across which the
+# static margin runs from 5% to 16% and the trim deflection from -4.1 to -1.4
+# degrees, which are meaningfully different aircraft that the cost rates
+# identically to four decimal places.  At 1e-3 the pull is still three orders of
+# magnitude below the ~5.0 in cost units that the nearest active constraint
+# carries, so it cannot trade against anything real; it only picks a point out of
+# the plateau.
+LE_SWEEP_PREFERENCE = 0.0
+SWEEP_TIEBREAK_WEIGHT = 1e-3
+
 
 def _shortfall(value, floor):
     """Fractional shortfall below a floor, zero when satisfied.
@@ -1249,7 +1892,7 @@ def _excess(value, ceiling):
     return jnp.maximum(0.0, value - ceiling) / jnp.maximum(jnp.abs(ceiling), 1e-9)
 
 
-def constraints(p, cl_max=0.8, deflection_deg=None):
+def constraints(p, cl_max=None, deflection_deg=None):
     """Each constraint's fractional shortfall.  All zero means feasible."""
     g = unpack(p)
     r = evaluate(p, cl_max=cl_max, deflection_deg=deflection_deg)
@@ -1284,6 +1927,20 @@ def constraints(p, cl_max=0.8, deflection_deg=None):
         "servo_rail_depth": _excess(
             g["servo_height"] / linkage_coupling.MM_PER_M,
             0.5 * r["servo_depth_available"]),
+        # Pitch stability.  The centre of gravity has to sit ahead of the
+        # aerodynamic centre, or the aircraft diverges in pitch.  This is the
+        # constraint that finally gives le_sweep_deg something to push against:
+        # until the balance was modelled, sweep was invisible to the objective
+        # and the optimizer left it wherever the random start put it.
+        "static_margin": _shortfall(r["static_margin"], MIN_STATIC_MARGIN),
+        # Trim is not free.  A design that needs a large trim deflection has
+        # spent its elevon before any control input arrives, and it also flies
+        # with a permanently deflected surface, which is draggy and stalls
+        # earlier than the section data assumes.
+        "trim_deflection": _excess(jnp.abs(r["eta_trim"]), MAX_TRIM_DEFLECTION),
+        # The prop has to miss the wing.  Only binds once the motors are pulled
+        # inboard, which the wiring reach and the packaging both encourage.
+        "prop_clearance": jnp.maximum(0.0, -r["prop_clearance"]) / 0.001,
         "twr": _shortfall(r["twr"], MIN_TWR),
         "re_tip": _shortfall(r["re_tip"], MIN_RE_TIP),
         "aspect_ratio": _shortfall(r["aspect_ratio"], MIN_ASPECT_RATIO),
@@ -1323,7 +1980,7 @@ def constraints(p, cl_max=0.8, deflection_deg=None):
     }
 
 
-def cost(p, cl_max=0.8, deflection_deg=None):
+def cost(p, cl_max=None, deflection_deg=None):
     """Stall speed plus penalties for violated constraints.
 
     A penalty method rather than a projection: the constraints couple through
@@ -1342,20 +1999,26 @@ def cost(p, cl_max=0.8, deflection_deg=None):
     g = unpack(p)
     tiebreak = (MOTOR_FRAC_PREFERENCE - g["motor_y"] / (0.5 * SPAN)) ** 2
 
+    # The same for sweep, which the static margin constraint bounds from below
+    # but nothing bounds from above.  See LE_SWEEP_PREFERENCE: normalized by the
+    # bound's own scale so the weight means the same thing regardless of the box.
+    sweep_tiebreak = ((g["le_sweep_deg"] - LE_SWEEP_PREFERENCE) / 45.0) ** 2
+
     return (r["v_stall"] + CONSTRAINT_WEIGHT * penalty
-            + TIEBREAK_WEIGHT * tiebreak)
+            + TIEBREAK_WEIGHT * tiebreak
+            + SWEEP_TIEBREAK_WEIGHT * sweep_tiebreak)
 
 
 cost_jit = jax.jit(cost)
 constraints_jit = jax.jit(constraints)
 
 
-def stall_only(p, cl_max=0.8):
+def stall_only(p, cl_max=None):
     """The objective without any penalty, for sensitivity reporting."""
     return evaluate(p, cl_max=cl_max)["v_stall"]
 
 
-def active_constraints(p, cl_max=0.8, deflection_deg=None, tol=1e-3):
+def active_constraints(p, cl_max=None, deflection_deg=None, tol=1e-3):
     """Constraints sitting at their limit rather than comfortably satisfied.
 
     A penalty method never drives a shortfall to exactly zero -- it settles
@@ -1368,7 +2031,7 @@ def active_constraints(p, cl_max=0.8, deflection_deg=None, tol=1e-3):
             if float(value) > tol * tol]
 
 
-def sensitivity(p, bounds, cl_max=0.8, deflection_deg=None):
+def sensitivity(p, bounds, cl_max=None, deflection_deg=None):
     """Per-variable gradients and bound status at a design point.
 
     Two gradients are reported because they answer different questions.
@@ -1450,6 +2113,11 @@ BASELINE = jnp.array([
              # roughly neutral against this taper; there is no stability model
              # here to choose it properly.
     BATTERY_STATION_DEFAULT,   # battery_station, chord fraction of its nose
+    # Camber, as Glauert coefficients.  Started at A2 = A1, which is exactly
+    # zero pitching moment: a neutral point that presupposes neither camber for
+    # lift nor reflex for trim, and lets the optimizer decide which it wants.
+    0.08,    # camber_a1
+    0.08,    # camber_a2
     # Linkage, mm.  Taken from the sliders the interactive linkage tool was
     # left on, except servo_x, which is now derived from the wing geometry.
     3.55,    # servo_height, servo body depth off the hinge axis
@@ -1460,7 +2128,7 @@ BASELINE = jnp.array([
 ])
 
 
-def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
+def report(p=None, v_cruise=12.0, cl_max=None, deflection_deg=None):
     """Print a readable summary of one design point."""
     p = BASELINE if p is None else p
     g = unpack(p)
@@ -1479,13 +2147,32 @@ def report(p=None, v_cruise=12.0, cl_max=0.8, deflection_deg=None):
     print(f"  aspect ratio    {float(r['aspect_ratio']):8.2f}")
     print(f"  MAC             {float(r['mac']) * 1e3:8.1f} mm")
 
+    print("\n=== Section and balance ===")
+    print(f"  camber          {float(r['camber']) * 100:8.2f} %"
+          f"   (at {float(r['camber_station']) * 100:.0f}% chord,"
+          f" A1 {float(g['camber_a1']):+.3f} A2 {float(g['camber_a2']):+.3f})")
+    reflex = "reflexed" if float(g["camber_a2"]) > float(g["camber_a1"]) else "plain"
+    print(f"  Cm about c/4    {float(r['cm_c4']):+8.4f}     ({reflex})")
+    print(f"  Cl_max          {float(r['cl_max']):8.2f}     (was a constant 0.80)")
+    print(f"  CG              {float(r['cg_station']) * 1e3:8.1f} mm aft of root LE")
+    print(f"  AC              {float(r['ac_station']) * 1e3:8.1f} mm aft of root LE")
+    sm = float(r["static_margin"])
+    verdict = "STABLE" if sm >= MIN_STATIC_MARGIN else (
+        "marginal" if sm > 0 else "DIVERGENT")
+    print(f"  static margin   {sm * 100:+8.1f} %      {verdict}")
+    print(f"  trim deflection {float(r['eta_trim']):+8.2f} deg"
+          f"   (alpha {float(r['alpha_trim']):+.2f} deg at cruise)")
+    print(f"  throw after trim{float(r['delta_geom_net']):8.1f} deg"
+          f"   (of {float(r['delta_geom']):.1f} deg geometric)")
+    print(f"  prop clearance  {float(r['prop_clearance']) * 1e3:+8.1f} mm")
+
     print("\n=== Mass and performance ===")
     print(f"  all-up mass     {float(r['mass']) * 1e3:8.1f} g")
     print(f"  thrust/weight   {float(r['twr']):8.2f}"
           f"   {'OK' if float(r['twr']) > 1.0 else 'CANNOT HOVER'}")
     print(f"  wing loading    {float(r['wing_loading']):8.1f} N/m^2")
     print(f"  stall speed     {float(r['v_stall']):8.1f} m/s"
-          f"   (at Cl_max {cl_max})")
+          f"   (at Cl_max {float(r['cl_max']):.2f})")
     print(f"  Re at MAC       {float(r['re_mac']):8,.0f}")
     print(f"  Re at tip       {float(r['re_tip']):8,.0f}"
           f"   {'-- very low' if float(r['re_tip']) < 30000 else ''}")
