@@ -407,8 +407,14 @@ def authority_figure(p=None, deflection_deg=None):
             name=key.capitalize(), marker_color=colour,
         ))
 
+    # Read the deflection back out rather than off the argument, which is None
+    # in the usual case: the model derives it from the authority floors and what
+    # the linkage can deliver.
+    delta = float(r["deflection_deg"])
+    derived = "" if deflection_deg is not None else " (derived)"
+
     fig.update_layout(
-        title=f"Control authority at {deflection_deg:.0f} deg deflection",
+        title=f"Control authority at {delta:.2f} deg deflection{derived}",
         xaxis={"title": "flight regime"},
         yaxis={"title": "moment, mN.m", "type": "log"},
         barmode="group",
