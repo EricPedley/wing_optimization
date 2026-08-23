@@ -41,6 +41,20 @@ POLISH_ITERS = 30
 # servo and battery need, and the hinge bounds keep the elevon between 10% and
 # 40% of chord where thin-airfoil flap theory is still meaningful.
 BOUNDS = {
+    # Span, capped by the printer bed -- see am.MAX_SPAN, which is two beds
+    # because the wing is printed as two panels joined at the centreline.  The
+    # floor is a wing narrow enough to be a different aircraft than this one;
+    # it exists so a start cannot wander somewhere the aspect-ratio floor and
+    # the chord cap cannot both be satisfied.
+    #
+    # Expect this to sit on its upper bound.  Span buys area without buying
+    # chord, so it lowers stall speed while *helping* the aspect ratio and the
+    # tip Reynolds number, and the only thing charging for it in this model is
+    # skin mass and roll inertia.  What is missing is structure: root bending
+    # moment grows with the square of the span against a constant wall
+    # thickness.  Read a span at the bound as "the printer allows it", not as a
+    # claim that the wing holds together.
+    "span": (0.150, am.MAX_SPAN),
     "root_chord": (0.070, am.MAX_CHORD),
     "tip_chord": (0.035, am.MAX_CHORD),
     "root_thickness": (0.010, 0.030),
@@ -48,12 +62,15 @@ BOUNDS = {
     "x_hinge": (0.60, 0.90),
     "elevon_inboard_frac": (0.10, 0.70),
     # Motor and servo spanwise positions are capped by how far the existing
-    # wiring reaches.  Expressed as span fractions here because that is what the
-    # design vector holds; the constraints check the same limits in metres, so a
-    # violation is caught even if these bounds are widened.
-    "motor_frac": (0.20, am.MAX_MOTOR_Y / (0.5 * am.SPAN)),
+    # wiring reaches.  That limit is in metres, and with span a design variable
+    # the fraction it corresponds to is no longer a constant -- so the boxes are
+    # left open to the tip and the motor_reach and servo_reach constraints do
+    # the capping, which they already did in metres.  Pinning these boxes to a
+    # fraction of any one span would either over-restrict a long wing or let a
+    # short one place hardware the harness cannot reach.
+    "motor_frac": (0.20, 1.0),
     "servo_chord_frac": (0.20, 0.70),
-    "servo_span_frac": (0.15, am.MAX_SERVO_Y / (0.5 * am.SPAN)),
+    "servo_span_frac": (0.15, 1.0),
     # Leading-edge sweep.  Nothing in the objective rewards or penalizes it --
     # there is no stability model -- so the optimizer will leave it wherever it
     # starts.  The bounds are what keeps it in the range a tailless aircraft is
@@ -65,6 +82,13 @@ BOUNDS = {
     # all, and away from the trailing edge because the battery still has to fit
     # ahead of it.
     "battery_station": (0.02, 0.40),
+    # Motor mount standoff, millimetres.  Floored at the tip clearance it has to
+    # cover, since below that the prop strikes the wing and the box would only
+    # be offering the optimizer infeasible ground.  The ceiling is loose on
+    # purpose: the boom's own mass is what limits this now, and a length the
+    # objective genuinely wants should be reachable rather than clipped.  Expect
+    # the answer near the floor -- boom mass costs TWR, which binds.
+    "motor_standoff_mm": (am.PROP_TIP_CLEARANCE * 1e3, 40.0),
     # Camber, as Birnbaum-Glauert coefficients.  These are not directly
     # readable as a shape -- see the camber section of the model -- so the
     # bounds are set by what they produce rather than by what they look like:

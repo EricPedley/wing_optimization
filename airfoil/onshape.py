@@ -219,10 +219,11 @@ def design_variables(p):
     # metres, and _variable multiplies a LENGTH by 1e3 to emit millimetres.
     # Scale them back so they are not written to CAD a thousand times too big.
     mm_vars = {"servo_height", "servo_rod_dy", "servo_travel_mm",
-               "flap_x_mm", "flap_y_mm"}
+               "flap_x_mm", "flap_y_mm", "motor_standoff_mm"}
     values = [float(v) / 1e3 if n in mm_vars else float(v)
               for n, v in zip(am.DESIGN_VARS, p)]
     types = {
+        "span": LENGTH,
         "root_chord": LENGTH,
         "tip_chord": LENGTH,
         "root_thickness": LENGTH,
@@ -234,6 +235,7 @@ def design_variables(p):
         "servo_span_frac": NUMBER,
         "le_sweep_deg": ANGLE,
         "battery_station": NUMBER,
+        "motor_standoff_mm": LENGTH,
         "servo_height": LENGTH,
         "servo_rod_dy": LENGTH,
         "servo_travel_mm": LENGTH,
@@ -241,6 +243,7 @@ def design_variables(p):
         "flap_y_mm": LENGTH,
     }
     notes = {
+        "span": "Full span, tip to tip",
         "root_chord": "Root chord",
         "tip_chord": "Tip chord",
         "root_thickness": "Maximum section thickness at the root",
@@ -252,6 +255,7 @@ def design_variables(p):
         "servo_span_frac": "Servo spanwise station, fraction of semi-span",
         "le_sweep_deg": "Leading-edge sweep, positive aft",
         "battery_station": "Battery forward face, fraction of root chord",
+        "motor_standoff_mm": "Motor mount pad, proud of the leading edge",
         "servo_height": "Servo body depth off the hinge axis",
         "servo_rod_dy": "Control rod pickup, offset from the servo body",
         "servo_travel_mm": "Servo stroke",
@@ -276,7 +280,8 @@ def derived_variables(p):
     """
     g = am.unpack(p)
     r = am.evaluate(p)
-    semi = 0.5 * am.SPAN
+    span = float(g["span"])
+    semi = 0.5 * span
 
     root_chord = float(g["root_chord"])
     tip_chord = float(g["tip_chord"])
@@ -285,10 +290,11 @@ def derived_variables(p):
 
     def le_at(y):
         """Leading-edge offset aft of the root leading edge at spanwise y."""
-        return float(am.leading_edge_x(abs(y) / semi, float(g["le_sweep_deg"])))
+        return float(am.leading_edge_x(span, abs(y) / semi,
+                                       float(g["le_sweep_deg"])))
 
     def chord_at(y):
-        return float(am.local_geometry(root_chord, tip_chord, 0.0, 0.0,
+        return float(am.local_geometry(span, root_chord, tip_chord, 0.0, 0.0,
                                        abs(y) / semi)[0])
 
     elevon_in = float(g["elevon_inboard_y"])
@@ -303,7 +309,7 @@ def derived_variables(p):
     elevon_chord = float(am.elevon_chord_at(mac, x_hinge, mac))
 
     entries = [
-        ("cad_span", LENGTH, am.SPAN, "Full span, tip to tip"),
+        ("cad_span", LENGTH, span, "Full span, tip to tip"),
         ("cad_semi_span", LENGTH, semi, "Centreline to tip"),
         ("cad_root_chord", LENGTH, root_chord, "Root chord"),
         # The centre strip is a prismatic extrusion of the root section: no

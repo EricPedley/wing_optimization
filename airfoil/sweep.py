@@ -51,6 +51,25 @@ def main():
         },
     )
 
+    # Span, which is a design variable now rather than a printer-bed constant.
+    # It is the strongest single lever on stall speed in this model, and the
+    # sweep is here to show what pushes back: skin mass rises linearly with it
+    # and roll inertia with its square, so hover roll authority is what pays.
+    # Nothing here charges for root bending, which is the real limit.
+    sweep(
+        "Span (mm)",
+        [0.200, 0.256, 0.320, 0.400, 0.460, 0.512],
+        lambda x: {
+            "mm": x * 1e3,
+            "AR": am.evaluate(with_var(idx["span"], x))["aspect_ratio"],
+            "mass_g": am.evaluate(with_var(idx["span"], x))["mass"] * 1e3,
+            "v_stall": am.evaluate(with_var(idx["span"], x))["v_stall"],
+            "twr": am.evaluate(with_var(idx["span"], x))["twr"],
+            "d_req": am.evaluate(with_var(idx["span"], x))["delta_req"],
+            "re_tip": am.evaluate(with_var(idx["span"], x))["re_tip"],
+        },
+    )
+
     # Motor position trades yaw authority against slipstream coverage.  Wash
     # fraction saturates once the slipstream is fully inside the elevon span,
     # but the yaw moment arm keeps growing, so the two do not peak together.
@@ -58,7 +77,7 @@ def main():
         "Motor spanwise position (fraction of semi-span)",
         [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60],
         lambda x: {
-            "y_mm": x * 0.5 * am.SPAN * 1e3,
+            "y_mm": x * 0.5 * float(am.BASELINE[idx["span"]]) * 1e3,
             "wash": am.evaluate(with_var(idx["motor_frac"], x))["wash_fraction"],
             "yaw_mNm": am.evaluate(with_var(idx["motor_frac"], x))
             ["yaw_moment"] * 1e3,
@@ -133,7 +152,7 @@ def main():
         r = am.evaluate(am.BASELINE)
         label = "foamed" if rho < 700 else ("partly" if rho < 1000 else "solid PLA")
         print(f"  {rho:6.0f} kg/m^3  ({label:9s})"
-              f"  wing={float(am.wing_mass(0.105, 0.074, 0.016, 0.006)) * 1e3:5.1f} g"
+              f"  wing={float(am.wing_mass(0.256, 0.105, 0.074, 0.016, 0.006)) * 1e3:5.1f} g"
               f"  all-up={float(r['mass']) * 1e3:5.1f} g"
               f"  TWR={float(r['twr']):.2f}")
     am.SKIN_AREAL_DENSITY = saved_rho

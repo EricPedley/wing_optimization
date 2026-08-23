@@ -193,11 +193,12 @@ def test_static_margin_sign_and_sweep_direction():
     tailless aircraft is swept.  A sign slip here would have the optimizer
     sweeping the wing forward to buy stability."""
     g = am.unpack(am.BASELINE)
-    args = [float(g["root_chord"]), float(g["tip_chord"]),
+    args = [float(g["span"]), float(g["root_chord"]), float(g["tip_chord"]),
             float(g["root_thickness"]), float(g["tip_thickness"])]
-    _, mac = am.planform(args[0], args[1])
+    _, mac = am.planform(args[0], args[1], args[2])
     tail = [float(g["battery_station"]), float(g["servo_chord_frac"]),
-            float(g["servo_span_frac"]), float(mac)]
+            float(g["servo_span_frac"]), float(g["motor_standoff"]),
+            float(mac)]
     margins = [float(am.static_margin(*args, s, *tail)) for s in (0.0, 20.0, 40.0)]
     assert margins[0] < margins[1] < margins[2]
 
@@ -355,3 +356,129 @@ def test_drawn_boxes_sit_inside_the_section():
     drawn_gap = (min(upper) - max(box.y)) / 1e3
     assert drawn_gap == pytest.approx(
         float(r["battery_depth_available"]) - am.BATTERY_THICKNESS, abs=1e-9)
+
+
+def test_mass_items_reproduce_the_cg():
+    """The breakdown the plots read must be the same sum the constraint uses.
+    If they drift apart, the picture explains a centre of gravity the model does
+    not have."""
+    g = am.unpack(am.BASELINE)
+    args = [float(g[k]) for k in
+            ("span", "root_chord", "tip_chord", "root_thickness",
+             "tip_thickness", "le_sweep_deg", "battery_station",
+             "servo_chord_frac", "servo_span_frac", "motor_standoff")]
+    items = am.mass_items(*args)
+    total = sum(float(m) for m, _ in items.values())
+    moment = sum(float(m) * float(x) for m, x in items.values())
+    assert moment / total == pytest.approx(float(am.cg_station(*args)))
+    # And the mass it accounts for is the whole aircraft, not a subset.
+    expected = (float(am.wing_mass(*args[:5])) + am.FIXED_MASS
+                + float(am.boom_mass(float(g["motor_standoff"]))))
+    assert total == pytest.approx(expected)
+
+
+def test_only_the_motors_and_their_booms_are_ahead_of_the_wing():
+    """The motors and the booms carrying them pull the centre of gravity
+    forward and nothing else does.  That is the whole reason a tailless wing
+    with the battery inside it can balance, so if the motor station ever goes
+    positive the balance model has lost its only forward lever.
+
+    The boom is the shorter arm of the two: it is a strut spread along the
+    standoff, so its mass acts at the midpoint while the motor's acts at the
+    end.  If that ever inverts, the boom has been placed at the motor's station
+    and lengthening it would look better for balance than it is."""
+    g = am.unpack(am.BASELINE)
+    args = [float(g[k]) for k in
+            ("span", "root_chord", "tip_chord", "root_thickness",
+             "tip_thickness", "le_sweep_deg", "battery_station",
+             "servo_chord_frac", "servo_span_frac", "motor_standoff")]
+    items = am.mass_items(*args)
+    assert float(am.motor_station(float(g["motor_standoff"]))) < 0.0
+    ahead = [k for k, (_, x) in items.items() if float(x) < 0.0]
+    assert sorted(ahead) == ["booms", "motors"]
+    assert float(items["motors"][1]) < float(items["booms"][1]) < 0.0
+
+
+def test_a_longer_boom_costs_mass_and_thrust_to_weight():
+    """The boom has mass, and that is what prices the motor standoff.  Without
+    it a longer standoff was pure upside -- it bought static margin for free --
+    and the optimizer ran it to whatever the box allowed.
+
+    Both halves matter.  The mass has to show up on the scale, and it has to
+    show up against TWR, which is the constraint that actually binds."""
+    i = list(am.DESIGN_VARS).index("motor_standoff_mm")
+    short = am.BASELINE.at[i].set(5.0)
+    long = am.BASELINE.at[i].set(35.0)
+
+    r_short, r_long = am.evaluate(short), am.evaluate(long)
+    assert float(r_long["boom_mass"]) > float(r_short["boom_mass"]) > 0.0
+    assert float(r_long["mass"]) > float(r_short["mass"])
+    assert float(r_long["twr"]) < float(r_short["twr"])
+    # And it buys real static margin, which is the other side of the trade --
+    # otherwise there would be nothing to weigh the mass against.
+    assert float(r_long["static_margin"]) > float(r_short["static_margin"])
+
+
+def test_prop_disc_is_drawn_ahead_of_the_leading_edge():
+    """The mount pad stands proud of the leading edge and the motor body ahead
+    of that, so the disc cannot sit on the leading edge -- which is where it was
+    drawn before the motor station was modelled."""
+    plots = pytest.importorskip("airfoil.plots")
+    np = pytest.importorskip("numpy")
+
+    g = am.unpack(am.BASELINE)
+    fig = plots.planform_figure(am.BASELINE)
+    traces = {t.name: t for t in fig.data if t.name}
+
+    span = float(g["span"])
+    semi = 0.5 * span
+    le = float(am.leading_edge_x(span, float(g["motor_y"]) / semi,
+                                 float(g["le_sweep_deg"]))) * 1e3
+    disc = float(np.mean(traces["Prop disc"].y))
+    assert disc < le - float(g["motor_standoff"]) * 1e3
+
+    marker = [k for k in traces if k.startswith("Motor mass")][0]
+    assert float(min(traces[marker].y)) == pytest.approx(
+        (float(am.motor_station(float(g["motor_standoff"]))) * 1e3) + le,
+        abs=1e-6)
+
+
+def test_yaw_authority_pulls_the_motors_apart():
+    """Yaw is the weakest axis and its authority is the moment arm, so all else
+    equal the motors should sit further apart.  That used to be asserted by a
+    tie-break; it is now in the objective, and this pins it there.
+
+    Checked on the cost rather than on the yaw moment alone, because the point
+    is that the *objective* prefers it -- a yaw term nothing weighs would leave
+    motor position flat again."""
+    i = list(am.DESIGN_VARS).index("motor_frac")
+    inboard = am.BASELINE.at[i].set(0.25)
+    outboard = am.BASELINE.at[i].set(0.35)
+
+    r_in, r_out = am.evaluate(inboard), am.evaluate(outboard)
+    assert abs(float(r_out["authority"]["cruise"]["alpha_yaw"])) > \
+        abs(float(r_in["authority"]["cruise"]["alpha_yaw"]))
+    # Both are feasible on wire reach at these stations, so the cost difference
+    # is the yaw reward rather than a constraint firing.
+    assert float(am.cost(outboard)) < float(am.cost(inboard))
+
+
+def test_motor_wire_is_measured_from_the_flight_controller():
+    """The harness starts at the FC on the battery, not at the centreline, and
+    it runs to a motor that sits ahead of the leading edge on a boom.  All three
+    of those lengthen the run, and the constraint has to see them.
+
+    The spanwise station alone is what this used to measure, and it understated
+    the run enough that the baseline looked to fit a harness it does not."""
+    g = am.unpack(am.BASELINE)
+    r = am.evaluate(am.BASELINE)
+
+    # The run exceeds the bare spanwise station, because of the chordwise and
+    # boom components.
+    assert float(r["motor_wire"]) > float(g["motor_y"])
+
+    # A longer boom lengthens the wire, which a centreline measure would miss
+    # entirely.
+    i = list(am.DESIGN_VARS).index("motor_standoff_mm")
+    longer = am.BASELINE.at[i].set(float(g["motor_standoff_mm"]) + 20.0)
+    assert float(am.evaluate(longer)["motor_wire"]) > float(r["motor_wire"])

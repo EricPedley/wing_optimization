@@ -56,7 +56,20 @@ G = 9.81             # m/s^2
 # been measured, and it sets whether the aircraft can hover at all.  Everything
 # downstream of THRUST_PER_MOTOR should be treated as provisional until it is.
 
-SPAN = 0.256                 # m, capped by the 3D printer bed
+# Span used to be fixed at 0.256 m, one printer bed wide.  It is now a design
+# variable, because span is the strongest lever the model has on stall speed --
+# it buys area without buying chord, so it lowers wing loading while *raising*
+# the aspect ratio and the tip Reynolds number, which are the two things the
+# chord bound and the aspect-ratio floor exist to protect.  Nothing in the model
+# pushed back on it before, and that was the honest reason to hold it fixed.
+#
+# The cap is 512 mm, two bed widths: the wing is printed as left and right
+# panels joined at the centreline, so the bed limits the *semi*-span rather than
+# the span.  What the model still cannot see is that a longer span costs
+# structure -- the root bending moment grows with the square of it and the skin
+# thickness here is a constant -- so expect the optimizer to sit on this bound,
+# and read it as "the printer allows this", not "the structure does".
+MAX_SPAN = 0.512             # m, two printer beds, joined at the centreline
 THRUST_PER_MOTOR = 0.035     # kgf, ~35 g.  UNMEASURED -- see note above.
 PROP_DIAMETER = 0.051        # m, 2 inch
 
@@ -74,11 +87,32 @@ PROP_DIAMETER = 0.051        # m, 2 inch
 # group and the battery the aft, which is the part that matters for the CG; the
 # avionics are small and near the middle where their exact station matters least.
 BATTERY_MASS = 0.008         # kg, the 1S cell
-MOTOR_MASS = 0.0075          # kg, both motors with their props and mounts
+MOTOR_MASS = 0.0075          # kg, both motors with their props, bare
 AVIONICS_MASS = 0.0055       # kg, FC + RX + ESC + wiring, near the centre
 SERVO_MASS = 0.004           # kg, both servos
 
 FIXED_MASS = BATTERY_MASS + MOTOR_MASS + AVIONICS_MASS + SERVO_MASS  # kg
+
+# Motor boom.  The standoff is a printed strut carrying the motor ahead of the
+# leading edge, so its mass is its length -- and that is the term that was
+# missing while the standoff was a constant: with no mass on it, a longer boom
+# was free, bought static margin for nothing, and the optimizer ran it to
+# whatever the box allowed.  It is not free.  A boom costs mass twice over, once
+# on the scale and once by putting that mass at the end of a lever, and mass is
+# what the binding TWR constraint is made of.
+#
+# Linear in length, per side, for a strut of roughly constant section printed in
+# the same material as the wing.  The figure is estimated rather than weighed,
+# like the rest of this breakdown: a small solid-ish printed strut of a few mm
+# section comes out near half a gram per centimetre in ordinary PLA, so 0.05
+# kg/m is the right order.  It is the *slope* that matters here rather than the
+# value, since a constant offset would not change any decision.
+BOOM_LINEAR_DENSITY = 0.05   # kg/m of standoff, per side
+
+
+def boom_mass(standoff):
+    """Mass of both motor booms, in kg, for a given standoff length."""
+    return 2.0 * BOOM_LINEAR_DENSITY * jnp.maximum(standoff, 0.0)
 
 # Chord fraction where the avionics stack sits.  Small and centrally placed, so
 # this is a weak lever on the CG compared with the battery and the motors; it is
@@ -98,17 +132,35 @@ AVIONICS_STATION = 0.35
 #     or the blade strikes the wing;
 #   * the motor body occupies MOTOR_BODY_LENGTH between the disk and its mount
 #     face;
-#   * the mount face itself has to stand proud of the leading edge by
-#     MOTOR_MOUNT_STANDOFF so it is a flat pad rather than a knife edge.
+#   * the mount face itself has to stand proud of the leading edge by the
+#     standoff, so it is a flat pad rather than a knife edge.
 #
 # The motor's mass centre sits about halfway along its body, which is what the
 # CG calculation wants, and that lands *ahead* of the leading edge -- a negative
 # chord station.  That is the point: the motors are the only significant mass
 # forward of the wing, and they are what makes a tailless layout balance.
+#
+# The standoff used to be a constant 3 mm, which was 1 mm short of the tip
+# clearance it has to cover -- so the design was infeasible on its own terms and
+# nothing said so.  As a design variable it is free to clear that, and it earns
+# its place in the vector by doing three things at once: it holds the prop disk
+# off the leading edge, it carries the motor mass forward, which is the only
+# forward lever the CG has, and it costs the mass of the boom that does the
+# carrying.  Prop clearance floors it, static margin rewards it, and TWR charges
+# for it, which is what makes it a trade rather than a packaging number.  See
+# BOOM_LINEAR_DENSITY: while the boom was massless the reward had no cost and
+# the standoff ran to whatever the box allowed.
+#
+# What it is *not* coupled to is sweep.  Two earlier versions of
+# prop_clearance_slack charged tan(sweep) * prop_radius against this standoff, on
+# the reasoning that sweep carries the leading edge forward across the blade.
+# That treats a tractor prop as though its disk lay in the plane of the wing; it
+# does not, and the term was fictitious.  See prop_clearance_slack for the
+# geometry.  It mattered: at 45 degrees of sweep the phantom term came to 25 mm
+# against a 4 mm margin, which drove the standoff to a 35 mm pylon.
 MOTOR_BODY_LENGTH = 0.004    # m, disk plane to mount face, 4 mm
-MOTOR_MOUNT_STANDOFF = 0.003  # m, mount pad proud of the leading edge
-# Radial gap between the prop tip circle and the leading edge.  Not zero: the
-# blade flexes under load and the wing is not a perfect surface.
+# Axial gap between the prop disk and the leading edge.  Not zero: the blade
+# flexes forward under load and the wing is not a perfect surface.
 PROP_TIP_CLEARANCE = 0.004   # m
 
 BATTERY_LENGTH = 0.065       # m, drives the minimum root chord
@@ -163,8 +215,22 @@ SERVO_FORCE_MARGIN = 1.5
 # pushes the motors outboard for yaw authority and the servos outboard to sit
 # in thinner, shorter-chord section.  Lengthening either harness would buy real
 # performance, so these are worth revisiting rather than treating as fixed.
-MAX_MOTOR_Y = 0.055          # m from the centreline
-MAX_SERVO_Y = 0.060          # m from the centreline
+#
+# These are lengths of *wire*, measured from where the wire starts.  That is the
+# flight controller, which sits with the avionics on the battery -- not the
+# centreline, and not the leading edge.  Measuring from the centreline was a
+# simplification that stopped being harmless once the motors moved onto booms:
+# a motor 30 mm outboard on a 22 mm standoff ahead of a swept leading edge is a
+# good deal further from the FC than its spanwise station alone suggests, and
+# the harness has to cover the whole run.
+MAX_MOTOR_WIRE = 0.055       # m of wire, FC to motor
+MAX_SERVO_WIRE = 0.060       # m of wire, FC to servo
+
+# Where the flight controller sits, as a chord fraction of the root.  The
+# avionics stack rides with the battery, so this follows the battery station
+# rather than being placed independently -- see AVIONICS_STATION, which puts the
+# same stack at a fixed fraction for the CG sum.  The wire leaves from here.
+FC_STATION = AVIONICS_STATION
 
 # Elevon planform.  With a constant hinge *fraction* the hinge line converges on
 # the trailing edge as the chord tapers, so the elevon shrinks outboard -- on
@@ -592,7 +658,7 @@ def yaw_moment(differential_thrust_n, motor_y):
     is met with a wide margin at every reachable motor position, and stall speed
     does not depend on where the motors sit, so the cost is flat in motor_frac
     and the optimizer leaves it wherever it started.  Motor position is chosen
-    by :data:`MOTOR_FRAC_PREFERENCE` below rather than optimized; the sweep in
+    by :func:`motor_frac_preference` below rather than optimized; the sweep in
     ``sweep.py`` is what shows the tradeoff.
     """
     return differential_thrust_n * motor_y
@@ -666,12 +732,18 @@ def servo_force(hinge_moment_nm, advantage):
 # --- Geometry and mass --------------------------------------------------------
 
 
-def root_section_fraction():
-    """Semi-span fraction occupied by the constant-chord centre section."""
-    return jnp.clip(0.5 * ROOT_SECTION_WIDTH / (0.5 * SPAN), 0.0, 1.0)
+def root_section_fraction(span):
+    """Semi-span fraction occupied by the constant-chord centre section.
+
+    Note this *shrinks* as the span grows: the centre strip is a fixed width in
+    millimetres, set by the hardware that has to sit in it, so a longer wing is
+    a smaller fraction parallel-sided.  Span is a design variable now, so this
+    fraction moves with it rather than being a constant of the geometry.
+    """
+    return jnp.clip(0.5 * ROOT_SECTION_WIDTH / (0.5 * span), 0.0, 1.0)
 
 
-def taper_fraction(span_fraction):
+def taper_fraction(span, span_fraction):
     """How far into the taper a station sits, 0 at the root, 1 at the tip.
 
     Zero across the whole constant-chord centre section, then rising linearly
@@ -680,12 +752,12 @@ def taper_fraction(span_fraction):
     this, so the parallel-sided centre strip exists once rather than being
     re-derived in every consumer.
     """
-    f0 = root_section_fraction()
+    f0 = root_section_fraction(span)
     remaining = jnp.maximum(1.0 - f0, 1e-9)
     return jnp.clip((span_fraction - f0) / remaining, 0.0, 1.0)
 
 
-def planform(root_chord, tip_chord):
+def planform(span, root_chord, tip_chord):
     """Wing area and mean aerodynamic chord.
 
     The wing is a constant-chord centre section of width ROOT_SECTION_WIDTH
@@ -697,8 +769,8 @@ def planform(root_chord, tip_chord):
     which for these two pieces is closed form: the rectangle contributes
     c_root^2 over its span, the trapezoid the usual (2/3) c_r (1+L+L^2)/(1+L).
     """
-    f0 = root_section_fraction()
-    semi = 0.5 * SPAN
+    f0 = root_section_fraction(span)
+    semi = 0.5 * span
     span_root = f0 * semi          # per side, constant-chord strip
     span_taper = (1.0 - f0) * semi  # per side, tapered panel
 
@@ -736,7 +808,7 @@ def reynolds(v_inf, chord):
 # for a tailless aircraft.
 
 
-def leading_edge_x(span_fraction, le_sweep_deg):
+def leading_edge_x(span, span_fraction, le_sweep_deg):
     """Leading edge position aft of the root leading edge, in m.
 
     The centre section is unswept as well as untapered -- it is a straight
@@ -744,12 +816,12 @@ def leading_edge_x(span_fraction, le_sweep_deg):
     strip.  ``le_sweep_deg`` is the sweep of the outer panel, and the tip ends
     up slightly less far aft than a wing swept from the centreline would.
     """
-    f0 = root_section_fraction()
-    swept = jnp.maximum(span_fraction - f0, 0.0) * 0.5 * SPAN
+    f0 = root_section_fraction(span)
+    swept = jnp.maximum(span_fraction - f0, 0.0) * 0.5 * span
     return jnp.tan(jnp.radians(le_sweep_deg)) * swept
 
 
-def quarter_chord_sweep_deg(root_chord, tip_chord, le_sweep_deg):
+def quarter_chord_sweep_deg(span, root_chord, tip_chord, le_sweep_deg):
     """Sweep of the quarter-chord line, degrees, positive aft.
 
     The aerodynamically meaningful sweep, since section lift acts near the
@@ -758,19 +830,20 @@ def quarter_chord_sweep_deg(root_chord, tip_chord, le_sweep_deg):
     edge, and outboard chords are shorter, so the quarter-chord line leans
     forward relative to the leading edge by an amount that grows with taper.
     """
-    semi = 0.5 * SPAN
-    dx = (leading_edge_x(1.0, le_sweep_deg) + 0.25 * tip_chord) - 0.25 * root_chord
+    semi = 0.5 * span
+    dx = ((leading_edge_x(span, 1.0, le_sweep_deg) + 0.25 * tip_chord)
+          - 0.25 * root_chord)
     return jnp.degrees(jnp.arctan2(dx, semi))
 
 
-def trailing_edge_sweep_deg(root_chord, tip_chord, le_sweep_deg):
+def trailing_edge_sweep_deg(span, root_chord, tip_chord, le_sweep_deg):
     """Sweep of the trailing edge, degrees, positive aft."""
-    semi = 0.5 * SPAN
-    dx = (leading_edge_x(1.0, le_sweep_deg) + tip_chord) - root_chord
+    semi = 0.5 * span
+    dx = (leading_edge_x(span, 1.0, le_sweep_deg) + tip_chord) - root_chord
     return jnp.degrees(jnp.arctan2(dx, semi))
 
 
-def wing_mass(root_chord, tip_chord, root_thickness, tip_thickness):
+def wing_mass(span, root_chord, tip_chord, root_thickness, tip_thickness):
     """Structural mass of a hollow printed shell, in kg.
 
     Wetted area is approximated as the planform area times a perimeter factor
@@ -778,7 +851,7 @@ def wing_mass(root_chord, tip_chord, root_thickness, tip_thickness):
     than the chord.  For thin sections the factor is close to 2; thickness adds
     a little.  Both surfaces, hence the 2.
     """
-    area, _ = planform(root_chord, tip_chord)
+    area, _ = planform(span, root_chord, tip_chord)
 
     mean_thickness_ratio = 0.5 * (
         root_thickness / jnp.maximum(root_chord, 1e-9)
@@ -788,10 +861,17 @@ def wing_mass(root_chord, tip_chord, root_thickness, tip_thickness):
     return area * perimeter_factor * SKIN_AREAL_DENSITY
 
 
-def total_mass(root_chord, tip_chord, root_thickness, tip_thickness):
-    """All-up mass, in kg."""
-    return (wing_mass(root_chord, tip_chord, root_thickness, tip_thickness)
-            + FIXED_MASS)
+def total_mass(span, root_chord, tip_chord, root_thickness, tip_thickness,
+               standoff):
+    """All-up mass, in kg.
+
+    Everything except the booms is fixed; the booms are not, which is what makes
+    the motor standoff cost something on the scale rather than only in the CG.
+    """
+    return (wing_mass(span, root_chord, tip_chord, root_thickness,
+                      tip_thickness)
+            + FIXED_MASS
+            + boom_mass(standoff))
 
 
 # --- Balance ------------------------------------------------------------------
@@ -803,11 +883,11 @@ def total_mass(root_chord, tip_chord, root_thickness, tip_thickness):
 # conclusion.  Aft is positive throughout.
 
 
-def motor_station():
+def motor_station(standoff):
     """Chordwise position of the motor mass centre, in m aft of the root LE.
 
     Derived from the prop rather than chosen.  Working forward from the leading
-    edge: the mount pad stands proud by MOTOR_MOUNT_STANDOFF, the motor body
+    edge: the mount pad stands proud by ``standoff``, the motor body
     occupies MOTOR_BODY_LENGTH ahead of that, and the prop disk sits at its
     front.  The mass centre is taken at the middle of the body.
 
@@ -816,45 +896,113 @@ def motor_station():
     balance at all.
 
     Prop tip clearance is checked separately in :func:`prop_clearance_slack`
-    rather than folded in here, because it constrains how far *outboard* the
-    motor must sit for the blade to miss the leading edge, which is a different
-    question from where the motor's mass acts.
+    rather than folded in here.  Both are set by the same standoff, but they ask
+    different questions of it: that one asks whether the blade misses the
+    leading edge, this one where the motor's mass acts.
     """
-    return -(MOTOR_MOUNT_STANDOFF + 0.5 * MOTOR_BODY_LENGTH)
+    return -(standoff + 0.5 * MOTOR_BODY_LENGTH)
 
 
-def prop_clearance_slack(le_sweep_deg, motor_y):
-    """Gap between the prop tip circle and the leading edge, in m.
+def prop_clearance_slack(standoff):
+    """Axial gap between the prop disk and the leading edge, in m.
 
-    The prop is a disk of radius PROP_DIAMETER/2 standing ahead of the wing on
-    a mount MOTOR_MOUNT_STANDOFF proud of the leading edge.  Its blade sweeps
-    inboard as well as outboard, so the tip passes closest to the wing on the
-    inboard side, where the leading edge is further forward than at the motor's
-    own station because of sweep.
+    Positive means the blade clears.  This is one subtraction, and the reason it
+    is a named function rather than an inline expression is that it has been got
+    wrong twice, both times by reaching for the spanwise geometry.
 
-    Positive means the blade clears.  This is what stops the optimizer from
-    sliding the motors inboard for packaging reasons until the props would
-    strike the wing -- a constraint that did not exist while the motor station
-    was not modelled at all.
+    The prop is a *tractor*, so its disk lies in the yz plane: perpendicular to
+    the thrust axis, which points forward along x.  The blade sweeps spanwise in
+    y and normal to the wing in z, and it occupies exactly one chordwise station
+    -- the disk plane, ``standoff`` ahead of the leading edge at the motor.  It
+    has no extent in x at all.  So the only thing between the blade and the wing
+    is the standoff, and the clearance is what is left of it after the margin.
+
+    Two earlier versions treated the disk as though it lay in the *xy* plane, in
+    the plane of the wing like a helicopter rotor: they walked the blade out to
+    ``motor_y +/- PROP_DIAMETER/2``, looked up the leading edge at those
+    stations, and charged the difference against the standoff.  A tractor blade
+    never visits those chordwise positions, so that term was fictitious.  It was
+    also large -- at 45 degrees of sweep it came to 25 mm against a 4 mm margin,
+    which is why it drove the motor standoff to 35 mm and made the design look
+    infeasible at any sensible one.  The first version had it with the opposite
+    sign, which credited sweep as clearance instead.
+
+    What the spanwise geometry would legitimately govern is the blade striking
+    the wing in *z*, and it does not bind here: the tip radius is 25.5 mm
+    against a local section half-thickness under 8 mm, so the tip passes well
+    outside the section and only approaches the wing where it crosses the disk
+    plane -- which is the axial gap this returns.  If the props ever grow small
+    enough, or the section thick enough, that the tip arc falls inside the
+    section depth, that check would have to be added.  It is not the sweep term
+    that was here.
     """
-    semi = 0.5 * SPAN
-    tip_radius = 0.5 * PROP_DIAMETER
-
-    # Where the blade tip passes on the inboard side, and how far aft the
-    # leading edge has fallen back by the motor's own station.  With aft sweep
-    # the inboard leading edge is *forward* of the motor's, so the gap closes.
-    inboard_y = jnp.maximum(motor_y - tip_radius, 0.0)
-    le_at_motor = leading_edge_x(motor_y / semi, le_sweep_deg)
-    le_at_inboard = leading_edge_x(inboard_y / semi, le_sweep_deg)
-
-    # The mount pad is at the leading edge of the motor's own station, so the
-    # disk plane sits that far forward; the blade tip sweeps back to the
-    # inboard leading edge, which is further forward by this much.
-    sweep_encroachment = le_at_motor - le_at_inboard
-    return MOTOR_MOUNT_STANDOFF + sweep_encroachment - PROP_TIP_CLEARANCE
+    return standoff - PROP_TIP_CLEARANCE
 
 
-def wing_centroid_x(root_chord, tip_chord, le_sweep_deg):
+def fc_station(root_chord):
+    """Chordwise position of the flight controller, in m aft of the root LE.
+
+    On the centreline with the avionics and the battery, which is where the
+    wiring harness starts.
+    """
+    return FC_STATION * root_chord
+
+
+def motor_wire_length(span, root_chord, le_sweep_deg, motor_y, standoff):
+    """Wire run from the flight controller to a motor, in m.
+
+    A straight-line distance in three components, because that is what a harness
+    actually has to span and no one of them dominates:
+
+      * spanwise, from the centreline out to the motor's station;
+      * chordwise, from the FC's station forward to the leading edge at the
+        motor -- which sweep pushes *aft*, lengthening the run;
+      * the standoff, forward again along the boom to the motor itself.
+
+    Measuring only the spanwise term, which is what this model did before the
+    motors sat on booms, understates the run badly on a swept wing: at 45
+    degrees the leading edge at a 30 mm station is already 30 mm aft of the
+    root's, and the boom adds its own length on top of that.  The harness is a
+    fixed length of wire, so the whole run is what it has to cover.
+
+    Straight-line rather than routed around the structure.  A real harness runs
+    inside the wing and turns corners, so this is a lower bound on the length
+    needed; it is the same character of approximation as the rest of the
+    packaging model, and it errs toward saying a layout fits.
+    """
+    dy = jnp.abs(motor_y)
+    # Chordwise: FC to the motor's own leading edge, then forward along the boom.
+    # motor_station is negative (ahead of the LE), so subtracting it adds length.
+    x_fc = fc_station(root_chord)
+    x_motor = (leading_edge_x(span, jnp.abs(motor_y) / jnp.maximum(0.5 * span,
+                                                                  1e-9),
+                              le_sweep_deg)
+               + motor_station(standoff))
+    dx = x_fc - x_motor
+    return jnp.sqrt(dy ** 2 + dx ** 2)
+
+
+def servo_wire_length(span, root_chord, tip_chord, root_thickness,
+                      tip_thickness, le_sweep_deg, servo_span_frac,
+                      servo_chord_frac):
+    """Wire run from the flight controller to a servo, in m.
+
+    The same two components as the motor's, without a boom: out to the servo's
+    spanwise station, and fore or aft to where it sits in its own section, which
+    sweep has carried aft along with the leading edge.
+    """
+    semi = 0.5 * span
+    dy = jnp.abs(servo_span_frac * semi)
+
+    servo_chord, _ = local_geometry(span, root_chord, tip_chord, root_thickness,
+                                    tip_thickness, servo_span_frac)
+    x_servo = (leading_edge_x(span, servo_span_frac, le_sweep_deg)
+               + servo_chord_frac * servo_chord)
+    dx = x_servo - fc_station(root_chord)
+    return jnp.sqrt(dy ** 2 + dx ** 2)
+
+
+def wing_centroid_x(span, root_chord, tip_chord, le_sweep_deg):
     """Chordwise centroid of the wing skin, in m aft of the root LE.
 
     The skin is a lamina of uniform areal density, so its centroid is the
@@ -867,8 +1015,8 @@ def wing_centroid_x(root_chord, tip_chord, le_sweep_deg):
     skin centroid aft with it, moving the CG toward the aerodynamic centre and
     eating the static margin that the same sweep was meant to buy.
     """
-    f0 = root_section_fraction()
-    semi = 0.5 * SPAN
+    f0 = root_section_fraction(span)
+    semi = 0.5 * span
     span_root = f0 * semi
     span_taper = (1.0 - f0) * semi
 
@@ -886,7 +1034,7 @@ def wing_centroid_x(root_chord, tip_chord, le_sweep_deg):
         # t is the taper fraction, 0 at the strip edge and 1 at the tip.
         span_fraction = f0 + t * (1.0 - f0)
         chord = root_chord + (tip_chord - root_chord) * t
-        le = leading_edge_x(span_fraction, le_sweep_deg)
+        le = leading_edge_x(span, span_fraction, le_sweep_deg)
         return chord, chord * (le + 0.5 * chord)
 
     c0, m0 = panel_integrand(0.0)
@@ -901,9 +1049,9 @@ def wing_centroid_x(root_chord, tip_chord, le_sweep_deg):
     return moment / jnp.maximum(total_area, 1e-12)
 
 
-def cg_station(root_chord, tip_chord, root_thickness, tip_thickness,
+def cg_station(span, root_chord, tip_chord, root_thickness, tip_thickness,
                le_sweep_deg, battery_station, servo_chord_frac,
-               servo_span_frac):
+               servo_span_frac, standoff):
     """Centre of gravity, in m aft of the root leading edge.
 
     A mass-weighted sum over every item the aircraft is made of.  The wing skin
@@ -918,19 +1066,36 @@ def cg_station(root_chord, tip_chord, root_thickness, tip_thickness,
     include and it stops servo_chord_frac from being decided purely by
     packaging.
     """
-    semi = 0.5 * SPAN
+    items = mass_items(span, root_chord, tip_chord, root_thickness,
+                       tip_thickness, le_sweep_deg, battery_station,
+                       servo_chord_frac, servo_span_frac, standoff)
+    mass = sum(m for m, _ in items.values())
+    moment = sum(m * x for m, x in items.values())
+    return moment / jnp.maximum(mass, 1e-12)
 
-    w_mass = wing_mass(root_chord, tip_chord, root_thickness, tip_thickness)
-    x_wing = wing_centroid_x(root_chord, tip_chord, le_sweep_deg)
+
+def mass_items(span, root_chord, tip_chord, root_thickness, tip_thickness,
+               le_sweep_deg, battery_station, servo_chord_frac,
+               servo_span_frac, standoff):
+    """Every item of mass as ``name -> (mass in kg, station in m aft of root LE)``.
+
+    The breakdown :func:`cg_station` sums, exposed rather than kept internal so
+    that anything wanting to show *why* the centre of gravity sits where it does
+    -- the plots, in particular -- reads the same numbers the constraint does
+    instead of recomputing them and drifting out of agreement.
+    """
+    w_mass = wing_mass(span, root_chord, tip_chord, root_thickness,
+                       tip_thickness)
+    x_wing = wing_centroid_x(span, root_chord, tip_chord, le_sweep_deg)
 
     # Battery: a box on the centreline whose forward face is at its station, so
     # its mass acts half its own length aft of that.
     x_battery = battery_station * root_chord + 0.5 * BATTERY_LENGTH
 
     # Servos: at their own section, which is swept aft of the root.
-    servo_chord, _ = local_geometry(root_chord, tip_chord, root_thickness,
+    servo_chord, _ = local_geometry(span, root_chord, tip_chord, root_thickness,
                                     tip_thickness, servo_span_frac)
-    x_servo = (leading_edge_x(servo_span_frac, le_sweep_deg)
+    x_servo = (leading_edge_x(span, servo_span_frac, le_sweep_deg)
                + servo_chord_frac * servo_chord)
 
     # Avionics: near the centreline at a fixed fraction of the root chord.
@@ -939,18 +1104,30 @@ def cg_station(root_chord, tip_chord, root_thickness, tip_thickness,
     # Motors: ahead of the leading edge, hence negative.  Their own station is
     # swept aft with the wing, so the sweep does not buy as much forward arm as
     # the bare standoff suggests.
-    x_motor = leading_edge_x(0.0, le_sweep_deg) + motor_station()
+    x_le_motor = leading_edge_x(span, 0.0, le_sweep_deg)
+    x_motor = x_le_motor + motor_station(standoff)
 
-    mass = w_mass + FIXED_MASS
-    moment = (w_mass * x_wing
-              + BATTERY_MASS * x_battery
-              + SERVO_MASS * x_servo
-              + AVIONICS_MASS * x_avionics
-              + MOTOR_MASS * x_motor)
-    return moment / jnp.maximum(mass, 1e-12)
+    # Booms: struts running from the leading edge forward to the mount face, so
+    # unlike the motor they are spread along that length rather than sitting at
+    # the end of it.  A uniform strut's mass acts at its midpoint, which is half
+    # the standoff ahead of the leading edge -- a shorter arm than the motor's,
+    # so the boom pulls the CG forward less per gram than the mass it carries.
+    # That asymmetry is the whole trade: lengthening the boom moves the motor
+    # forward usefully while adding boom mass that is only half as useful and
+    # costs TWR regardless.
+    x_boom = x_le_motor - 0.5 * standoff
+
+    return {
+        "wing": (w_mass, x_wing),
+        "battery": (BATTERY_MASS, x_battery),
+        "servos": (SERVO_MASS, x_servo),
+        "avionics": (AVIONICS_MASS, x_avionics),
+        "motors": (MOTOR_MASS, x_motor),
+        "booms": (boom_mass(standoff), x_boom),
+    }
 
 
-def aerodynamic_centre_x(root_chord, tip_chord, le_sweep_deg):
+def aerodynamic_centre_x(span, root_chord, tip_chord, le_sweep_deg):
     """Wing aerodynamic centre, in m aft of the root leading edge.
 
     The area-weighted mean of each station's own quarter chord, which is where
@@ -964,9 +1141,9 @@ def aerodynamic_centre_x(root_chord, tip_chord, le_sweep_deg):
     the Cl_max correlation, and including it would imply a precision the rest of
     the model does not have.
     """
-    f0 = root_section_fraction()
-    span_root = f0 * 0.5 * SPAN
-    span_taper = (1.0 - f0) * 0.5 * SPAN
+    f0 = root_section_fraction(span)
+    span_root = f0 * 0.5 * span
+    span_taper = (1.0 - f0) * 0.5 * span
 
     area_root = root_chord * span_root
     x_root = 0.25 * root_chord
@@ -974,7 +1151,7 @@ def aerodynamic_centre_x(root_chord, tip_chord, le_sweep_deg):
     def panel_integrand(t):
         span_fraction = f0 + t * (1.0 - f0)
         chord = root_chord + (tip_chord - root_chord) * t
-        le = leading_edge_x(span_fraction, le_sweep_deg)
+        le = leading_edge_x(span, span_fraction, le_sweep_deg)
         return chord, chord * (le + 0.25 * chord)
 
     c0, m0 = panel_integrand(0.0)
@@ -989,9 +1166,9 @@ def aerodynamic_centre_x(root_chord, tip_chord, le_sweep_deg):
     return moment / jnp.maximum(total_area, 1e-12)
 
 
-def static_margin(root_chord, tip_chord, root_thickness, tip_thickness,
+def static_margin(span, root_chord, tip_chord, root_thickness, tip_thickness,
                   le_sweep_deg, battery_station, servo_chord_frac,
-                  servo_span_frac, mac):
+                  servo_span_frac, standoff, mac):
     """Static margin, as a fraction of the mean aerodynamic chord.
 
     Positive means the centre of gravity is ahead of the aerodynamic centre,
@@ -1004,10 +1181,10 @@ def static_margin(root_chord, tip_chord, root_thickness, tip_thickness,
     the objective could see sweep at all -- it was documented as a variable the
     optimizer would leave wherever it started.
     """
-    x_cg = cg_station(root_chord, tip_chord, root_thickness, tip_thickness,
-                      le_sweep_deg, battery_station, servo_chord_frac,
-                      servo_span_frac)
-    x_ac = aerodynamic_centre_x(root_chord, tip_chord, le_sweep_deg)
+    x_cg = cg_station(span, root_chord, tip_chord, root_thickness,
+                      tip_thickness, le_sweep_deg, battery_station,
+                      servo_chord_frac, servo_span_frac, standoff)
+    x_ac = aerodynamic_centre_x(span, root_chord, tip_chord, le_sweep_deg)
     return (x_ac - x_cg) / jnp.maximum(mac, 1e-9)
 
 
@@ -1040,18 +1217,18 @@ def thickness_at(x, max_thickness):
     return max_thickness * shape / 0.1000
 
 
-def local_camber(a1, a2, tip_a1, tip_a2, span_fraction):
+def local_camber(span, a1, a2, tip_a1, tip_a2, span_fraction):
     """Camber coefficients at a fraction of the semi-span.
 
     Lofted on the same schedule as chord and thickness, so the constant-chord
     centre strip is a true prismatic extrusion of the root section rather than
     one that starts twisting immediately.
     """
-    t = taper_fraction(span_fraction)
+    t = taper_fraction(span, span_fraction)
     return a1 + (tip_a1 - a1) * t, a2 + (tip_a2 - a2) * t
 
 
-def local_geometry(root_chord, tip_chord, root_thickness, tip_thickness,
+def local_geometry(span, root_chord, tip_chord, root_thickness, tip_thickness,
                    span_fraction):
     """Chord and maximum thickness at a fraction of the semi-span.
 
@@ -1060,7 +1237,7 @@ def local_geometry(root_chord, tip_chord, root_thickness, tip_thickness,
     schedule as chord so the centre strip is a true prismatic extrusion of the
     root section rather than a chord-constant but thinning one.
     """
-    t = taper_fraction(span_fraction)
+    t = taper_fraction(span, span_fraction)
     chord = root_chord + (tip_chord - root_chord) * t
     thickness = root_thickness + (tip_thickness - root_thickness) * t
     return chord, thickness
@@ -1185,7 +1362,7 @@ def battery_slack(root_chord, root_thickness, battery_station, a1=0.0, a2=0.0):
     return jnp.minimum(length_slack, depth_slack)
 
 
-def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
+def volume_slack(span, root_chord, tip_chord, root_thickness, tip_thickness,
                  servo_chord_frac, servo_span_fraction, x_hinge, battery_station,
                  a1=0.0, a2=0.0):
     """How much room the wing has beyond what it must hold, in m.
@@ -1201,17 +1378,18 @@ def volume_slack(root_chord, tip_chord, root_thickness, tip_thickness,
     battery = battery_slack(root_chord, root_thickness, battery_station, a1, a2)
     thickness_slack = root_thickness - MIN_ROOT_THICKNESS
 
-    chord, thickness = local_geometry(root_chord, tip_chord, root_thickness,
-                                      tip_thickness, servo_span_fraction)
+    chord, thickness = local_geometry(span, root_chord, tip_chord,
+                                      root_thickness, tip_thickness,
+                                      servo_span_fraction)
     # The servo has to clear the hinge in *its own* section, where the hinge
     # fraction is not x_hinge once the elevon is constant-chord.
-    _, mac = planform(root_chord, tip_chord)
+    _, mac = planform(span, root_chord, tip_chord)
     x_hinge_local = hinge_fraction_at(chord, x_hinge, mac)
     servo = servo_slack(chord, thickness, servo_chord_frac, x_hinge_local, a1, a2)
 
     # The servo must sit outboard of the battery, which occupies the centre
     # section out to roughly half its own width either side of the centreline.
-    span_slack = servo_span_fraction * 0.5 * SPAN - 0.5 * SERVO_WIDTH
+    span_slack = servo_span_fraction * 0.5 * span - 0.5 * SERVO_WIDTH
 
     return jnp.minimum(jnp.minimum(battery, thickness_slack),
                        jnp.minimum(servo, span_slack))
@@ -1346,7 +1524,8 @@ def trim_alpha_deg(cl_cruise, a1, a2):
 # also makes the three axes comparable, which they are not in raw moment terms.
 
 
-def inertia(root_chord, tip_chord, root_thickness, tip_thickness):
+def inertia(span, root_chord, tip_chord, root_thickness, tip_thickness,
+            standoff):
     """Roll, pitch, and yaw moments of inertia about the CG, in kg.m^2.
 
     The wing skin is treated as a lamina with mass spread over the planform, and
@@ -1358,18 +1537,31 @@ def inertia(root_chord, tip_chord, root_thickness, tip_thickness):
     Roll uses the span, pitch the chord, and yaw both, which is why a long-span
     low-chord wing is sluggish in roll and quick in pitch.
     """
-    w_mass = wing_mass(root_chord, tip_chord, root_thickness, tip_thickness)
-    _, mac = planform(root_chord, tip_chord)
+    w_mass = wing_mass(span, root_chord, tip_chord, root_thickness,
+                       tip_thickness)
+    _, mac = planform(span, root_chord, tip_chord)
 
     # Lamina about its own centroid: b^2/12 for roll, c^2/12 for pitch.  The
     # taper concentrates mass inboard, which the uniform assumption overstates
     # slightly; at this taper the error is a few percent.
-    i_roll = w_mass * SPAN ** 2 / 12.0
+    # Roll inertia goes as the square of the span, which is now a design
+    # variable and the main thing charging for it: a wing stretched for stall
+    # speed gets harder to roll in hover twice over, once through the extra skin
+    # mass and once through the arm it sits on.
+    i_roll = w_mass * span ** 2 / 12.0
     i_pitch = w_mass * mac ** 2 / 12.0
 
     # The fixed mass sits near the centreline, so it adds little to roll but
     # does add to pitch, spread over roughly the battery length.
     i_pitch = i_pitch + FIXED_MASS * (BATTERY_LENGTH ** 2) / 12.0
+
+    # The motors and their booms sit ahead of the wing on the standoff, which is
+    # a real pitch arm once the standoff is long: a point mass at radius r adds
+    # m r^2, and unlike the battery term above this one grows with a design
+    # variable.  Taken about the leading edge rather than the CG, which
+    # overstates it slightly, in keeping with the rest of this function.
+    i_pitch = i_pitch + MOTOR_MASS * motor_station(standoff) ** 2
+    i_pitch = i_pitch + boom_mass(standoff) * (0.5 * standoff) ** 2
 
     # Perpendicular axis theorem for a lamina: yaw is the sum of the other two.
     i_yaw = i_roll + i_pitch
@@ -1384,9 +1576,16 @@ def angular_acceleration(moment, inertia_value):
 # --- Design point evaluation --------------------------------------------------
 
 
-DESIGN_VARS = ["root_chord", "tip_chord", "root_thickness", "tip_thickness",
+DESIGN_VARS = ["span",
+               "root_chord", "tip_chord", "root_thickness", "tip_thickness",
                "x_hinge", "elevon_inboard_frac", "motor_frac", "servo_chord_frac",
                "servo_span_frac", "le_sweep_deg", "battery_station",
+               # Motor mount standoff, in millimetres.  Holds the prop disk off
+               # the leading edge, and by doing so carries the motor mass
+               # forward -- so it prices prop clearance and static margin
+               # against each other in one variable.  See the motor mounting
+               # section for why it stopped being a constant.
+               "motor_standoff_mm",
                # Camber, as Birnbaum-Glauert coefficients rather than as a
                # geometric shape.  See the camber section for why: reflex is
                # exactly A2 = A1 in these coordinates, and everything past A2
@@ -1419,12 +1618,14 @@ def unpack(p):
     mis-assignment of every variable after the insertion point.
     """
     v = {name: p[i] for i, name in enumerate(DESIGN_VARS)}
-    semi = 0.5 * SPAN
+    span = v["span"]
+    semi = 0.5 * span
     servo_span_f = v["servo_span_frac"]
     servo_chord, servo_thickness = local_geometry(
-        v["root_chord"], v["tip_chord"], v["root_thickness"],
+        span, v["root_chord"], v["tip_chord"], v["root_thickness"],
         v["tip_thickness"], servo_span_f)
     return {
+        "span": span,
         "root_chord": v["root_chord"],
         "tip_chord": v["tip_chord"],
         "root_thickness": v["root_thickness"],
@@ -1442,6 +1643,10 @@ def unpack(p):
         "servo_chord": servo_chord,
         "servo_thickness": servo_thickness,
         "le_sweep_deg": v["le_sweep_deg"],
+        # Millimetres in the design vector, metres everywhere downstream, so the
+        # conversion happens exactly once and here.
+        "motor_standoff_mm": v["motor_standoff_mm"],
+        "motor_standoff": v["motor_standoff_mm"] / linkage_coupling.MM_PER_M,
         "camber_a1": v["camber_a1"],
         "camber_a2": v["camber_a2"],
         # Tip section, as root plus the increment.  Aerodynamic washout: a tip
@@ -1513,9 +1718,11 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
     rather than the default.
     """
     g = unpack(p)
-    area, mac = planform(g["root_chord"], g["tip_chord"])
-    mass = total_mass(g["root_chord"], g["tip_chord"],
-                      g["root_thickness"], g["tip_thickness"])
+    span = g["span"]
+    area, mac = planform(span, g["root_chord"], g["tip_chord"])
+    mass = total_mass(span, g["root_chord"], g["tip_chord"],
+                      g["root_thickness"], g["tip_thickness"],
+                      g["motor_standoff"])
 
     camber, camber_x = camber_max(g["camber_a1"], g["camber_a2"])
     tip_camber, tip_camber_x = camber_max(g["tip_camber_a1"], g["tip_camber_a2"])
@@ -1528,11 +1735,11 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
     # semi-span rather than averaged between root and tip, since chord and
     # camber both vary and their product is not linear.
     _spans = jnp.linspace(0.0, 1.0, 9)
-    _chords = jnp.stack([local_geometry(g["root_chord"], g["tip_chord"],
+    _chords = jnp.stack([local_geometry(span, g["root_chord"], g["tip_chord"],
                                         g["root_thickness"], g["tip_thickness"],
                                         s)[0] for s in _spans])
     _cms = jnp.stack([
-        cm_quarter_chord(*local_camber(g["camber_a1"], g["camber_a2"],
+        cm_quarter_chord(*local_camber(span, g["camber_a1"], g["camber_a2"],
                                        g["tip_camber_a1"], g["tip_camber_a2"], s))
         for s in _spans])
     cm_c4 = (jnp.sum(_cms * _chords ** 2) / jnp.maximum(
@@ -1568,9 +1775,9 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
     # it is where the aircraft spends its time and where the freestream, rather
     # than the prop wash, is what the elevon has to work against.
     margin = static_margin(
-        g["root_chord"], g["tip_chord"], g["root_thickness"],
+        span, g["root_chord"], g["tip_chord"], g["root_thickness"],
         g["tip_thickness"], g["le_sweep_deg"], g["battery_station"],
-        g["servo_chord_frac"], g["servo_span_frac"], mac)
+        g["servo_chord_frac"], g["servo_span_frac"], g["motor_standoff"], mac)
     cl_cruise = cruise_lift_coefficient(mass, area, v_cruise)
     eta_trim = trim_deflection_deg(cm_c4, cl_cruise, margin, g["x_hinge"])
     alpha_trim = trim_alpha_deg(cl_cruise, g["camber_a1"], g["camber_a2"])
@@ -1585,8 +1792,8 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
     }
 
     i_roll, i_pitch, i_yaw = inertia(
-        g["root_chord"], g["tip_chord"],
-        g["root_thickness"], g["tip_thickness"])
+        span, g["root_chord"], g["tip_chord"],
+        g["root_thickness"], g["tip_thickness"], g["motor_standoff"])
 
     # Throttle needed in each regime, which is what limits differential thrust
     # and so yaw authority.  Hover sits near the thrust required to hold the
@@ -1708,9 +1915,10 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
         jnp.maximum, [a["servo_force"] for a in authority.values()])
 
     return {
+        "span": span,
         "area": area,
         "mac": mac,
-        "aspect_ratio": SPAN ** 2 / jnp.maximum(area, 1e-9),
+        "aspect_ratio": span ** 2 / jnp.maximum(area, 1e-9),
         "peak_servo_force": peak_servo_force,
         "servo_force_limit": force_limit,
         # Deflection, derived.  delta_req is what the authority floors demand,
@@ -1739,17 +1947,31 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
         "cm_c4_tip": cm_quarter_chord(g["tip_camber_a1"], g["tip_camber_a2"]),
         "static_margin": margin,
         "cg_station": cg_station(
-            g["root_chord"], g["tip_chord"], g["root_thickness"],
+            span, g["root_chord"], g["tip_chord"], g["root_thickness"],
             g["tip_thickness"], g["le_sweep_deg"], g["battery_station"],
-            g["servo_chord_frac"], g["servo_span_frac"]),
+            g["servo_chord_frac"], g["servo_span_frac"], g["motor_standoff"]),
         "ac_station": aerodynamic_centre_x(
-            g["root_chord"], g["tip_chord"], g["le_sweep_deg"]),
+            span, g["root_chord"], g["tip_chord"], g["le_sweep_deg"]),
         "cl_cruise": cl_cruise,
         "eta_trim": eta_trim,
         "alpha_trim": alpha_trim,
         "delta_geom_net": delta_geom_net,
-        "prop_clearance": prop_clearance_slack(
-            g["le_sweep_deg"], g["motor_y"]),
+        "prop_clearance": prop_clearance_slack(g["motor_standoff"]),
+        # Harness runs from the flight controller, which is what the reach
+        # constraints are really about.  Reported so the binding one is visible
+        # rather than hidden behind a spanwise station that no longer describes
+        # where the hardware sits.
+        "motor_wire": motor_wire_length(
+            span, g["root_chord"], g["le_sweep_deg"], g["motor_y"],
+            g["motor_standoff"]),
+        "servo_wire": servo_wire_length(
+            span, g["root_chord"], g["tip_chord"], g["root_thickness"],
+            g["tip_thickness"], g["le_sweep_deg"], g["servo_span_frac"],
+            g["servo_chord_frac"]),
+        "fc_station": fc_station(g["root_chord"]),
+        "motor_standoff": g["motor_standoff"],
+        "boom_mass": boom_mass(g["motor_standoff"]),
+        "motor_station": motor_station(g["motor_standoff"]),
         "delta_force": delta_force,
         "delta_req_pitch": required_deflection_deg(
             angular_acceleration(unit_pitch, i_pitch), MIN_ALPHA_PITCH_HOVER),
@@ -1770,7 +1992,7 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
         "root_tc": g["root_thickness"] / jnp.maximum(g["root_chord"], 1e-9),
         "tip_tc": g["tip_thickness"] / jnp.maximum(g["tip_chord"], 1e-9),
         "volume_slack": volume_slack(
-            g["root_chord"], g["tip_chord"],
+            span, g["root_chord"], g["tip_chord"],
             g["root_thickness"], g["tip_thickness"],
             g["servo_chord_frac"], g["servo_span_frac"], g["x_hinge"],
             g["battery_station"], g["camber_a1"], g["camber_a2"]),
@@ -1803,9 +2025,9 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
         "flap_effectiveness": flap_effectiveness_ratio(g["x_hinge"]),
         "le_sweep_deg": g["le_sweep_deg"],
         "c4_sweep_deg": quarter_chord_sweep_deg(
-            g["root_chord"], g["tip_chord"], g["le_sweep_deg"]),
+            span, g["root_chord"], g["tip_chord"], g["le_sweep_deg"]),
         "te_sweep_deg": trailing_edge_sweep_deg(
-            g["root_chord"], g["tip_chord"], g["le_sweep_deg"]),
+            span, g["root_chord"], g["tip_chord"], g["le_sweep_deg"]),
         # Thickness ratio at both ends.  Both are needed because chord and
         # thickness taper at different rates, so the extremes of t/c are not
         # necessarily at the extremes of either one.
@@ -1820,14 +2042,14 @@ def evaluate(p, v_cruise=12.0, cl_max=None, deflection_deg=None):
         # the elevon is constant-chord; the outboard one is the small one when
         # it is not.
         "elevon_chord_inboard": elevon_chord_at(
-            local_geometry(g["root_chord"], g["tip_chord"],
+            local_geometry(span, g["root_chord"], g["tip_chord"],
                            g["root_thickness"], g["tip_thickness"],
-                           g["elevon_inboard_y"] / (0.5 * SPAN))[0],
+                           g["elevon_inboard_y"] / (0.5 * span))[0],
             g["x_hinge"], mac),
         "elevon_chord_outboard": elevon_chord_at(
-            local_geometry(g["root_chord"], g["tip_chord"],
+            local_geometry(span, g["root_chord"], g["tip_chord"],
                            g["root_thickness"], g["tip_thickness"],
-                           g["elevon_outboard_y"] / (0.5 * SPAN))[0],
+                           g["elevon_outboard_y"] / (0.5 * span))[0],
             g["x_hinge"], mac),
         "i_roll": i_roll,
         "i_pitch": i_pitch,
@@ -1935,6 +2157,11 @@ MIN_RE_TIP = 25000.0
 # here, rather than inventing an aerodynamic penalty the model cannot compute.
 MAX_CHORD = 0.256
 
+# Span is capped the same way and for the same kind of reason -- see MAX_SPAN.
+# Both caps are box bounds in optimize.BOUNDS rather than penalty constraints,
+# because a printer bed is a hard limit the optimizer should never be allowed to
+# cross even transiently, not a shortfall to be traded against stall speed.
+
 # Aspect ratio floor.  Below roughly 2.5 the lifting-line and thin-airfoil
 # assumptions behind every lift number in this model break down: a low aspect
 # ratio wing carries much of its lift through nonlinear vortex effects that
@@ -1949,50 +2176,63 @@ MIN_ASPECT_RATIO = 2.5
 # than the optimizer can usually gain by cheating.
 CONSTRAINT_WEIGHT = 5000.0
 
-# Motor position is invisible to the objective: stall speed does not depend on
-# it, and every authority floor is met several times over at every reachable
-# position, so the cost is exactly flat in it.  Left alone the optimizer returns
-# whatever the random start happened to hold, which reads like a recommendation
-# and is not one.
+# Yaw authority beyond its floor is worth something, and the objective says so
+# rather than a tie-break pretending to.
 #
-# So it gets a tie-break instead: a tiny pull toward the outboard limit, on the
-# grounds that yaw is the weakest axis and its authority grows linearly with the
-# moment arm, while wash coverage saturates once the slipstream sits inside the
-# elevon.  The weight is small enough that it can never trade against a real
-# constraint -- it only decides between positions the objective rates equally.
-MOTOR_FRAC_PREFERENCE = 1.0
-TIEBREAK_WEIGHT = 1e-4
+# Motor spanwise position used to be invisible here: stall speed does not depend
+# on it, every authority floor is met several times over at any reachable
+# station, so the cost was exactly flat and a tie-break picked the answer.  That
+# was arbitrary.  The real statement is simpler and is a fact about the
+# aircraft: yaw is the weakest axis on a twin with no rudder, its only control
+# is differential thrust, and that authority grows linearly with the moment arm.
+# All else equal the motors should sit further apart, and "all else equal" is
+# exactly the flat direction the tie-break was papering over.
+#
+# So yaw acceleration in cruise enters the objective directly, as a *reward*
+# rather than a floor.  Cruise is the binding case for yaw -- see
+# available_differential_thrust, where throttle headroom is what limits the
+# differential and there is less of it at cruise than in hover.
+#
+# The weight sets what a rad/s^2 of yaw is worth in m/s of stall speed, which is
+# a real engineering judgement rather than a numerical convenience.  At 0.002 a
+# design buying 10 rad/s^2 of extra yaw pays about 0.02 m/s of stall speed for
+# it -- enough to decide a direction the objective would otherwise not see, small
+# enough that it never outbids a constraint or a meaningful amount of stall
+# speed.  The floor in MIN_ALPHA_YAW_CRUISE still applies underneath: this makes
+# more yaw preferable, it does not make less of it permissible.
+YAW_AUTHORITY_WEIGHT = 0.002
 
-# Sweep is the same story one step removed, and it is worth being explicit about
-# because the balance model makes it look solved when it is not.
+# Sweep needs no tie-break either, now that the motor booms are modelled.
 #
-# Adding the static margin constraint gave sweep something to push against for
-# the first time -- before it, sweep was documented as a variable the optimizer
-# would leave wherever it started.  But the constraint is a *floor*, not a
-# gradient: once the margin clears MIN_STATIC_MARGIN, stall speed does not care
-# how much sweep produced it, so d(stall)/d(sweep) is still exactly zero and any
-# sweep from about 30 degrees upward is rated identically.  The first solve
-# returned 43.9 degrees for that reason, which is not a recommendation, it is the
-# upper end of a flat region.
+# It used to have one, for the same reason motor position did: the static margin
+# constraint is a floor, so once the margin cleared it, stall speed did not care
+# how much sweep produced it and any sweep from about 30 degrees up was rated
+# identically.  A pull toward less sweep picked a point out of that plateau.
 #
-# So sweep gets a tie-break toward the *least* that does the job.  Sweep is not
-# free in reality -- it aggravates tip stall, which on a tailless aircraft is a
-# departure rather than a nuisance, and it costs span efficiency -- but none of
-# that is in this model, so the preference is stated as a preference rather than
-# dressed up as an optimum.  Anything past the floor is buying margin the model
-# cannot price with drag it cannot see.
+# The plateau is gone.  Sweep carries the leading edge aft, the motors mount on
+# the leading edge, and the flight controller does not move -- so sweeping the
+# wing lengthens the wire run to the motors and pushes it against MAX_MOTOR_WIRE,
+# a hard limit set by a harness that exists.  Sweep also drags the skin centroid
+# aft, which eats the very static margin it was bought for, and the motors then
+# need longer booms to keep their arm, which costs boom mass against TWR.  Those
+# are all real terms the model computes.  Sweep is priced now, so whatever the
+# optimizer returns for it is an answer rather than a preference.
+
+# The motor standoff had a tie-break here for a while, and it should not have.
 #
-# The weight is larger than the motor tie-break's because it has more to do.
-# Motor position is flat over a narrow box, while sweep is flat from about 30
-# degrees to the 45-degree bound -- a genuinely wide plateau across which the
-# static margin runs from 5% to 16% and the trim deflection from -4.1 to -1.4
-# degrees, which are meaningfully different aircraft that the cost rates
-# identically to four decimal places.  At 1e-3 the pull is still three orders of
-# magnitude below the ~5.0 in cost units that the nearest active constraint
-# carries, so it cannot trade against anything real; it only picks a point out of
-# the plateau.
-LE_SWEEP_PREFERENCE = 0.0
-SWEEP_TIEBREAK_WEIGHT = 1e-3
+# It looked like the third member of this family: flat objective, pinned at
+# whichever bound the start left, static margin sitting far above its floor with
+# nothing charging for the pylon that bought it.  The real problem was that the
+# boom had no mass.  A strut carrying a motor ahead of the leading edge is
+# printed structure, and once it weighs something the standoff is priced by the
+# same TWR constraint that binds everything else -- cost rises monotonically
+# with it, and no artificial pull is needed or wanted.  Adding one now would
+# double-charge a variable the objective can already see.
+#
+# Worth keeping as a worked example of the distinction this file keeps drawing:
+# a flat cost is sometimes a variable the objective genuinely cannot see, and
+# sometimes a term missing from the mass budget.  A tie-break is right for the
+# first and papers over the second.  See BOOM_LINEAR_DENSITY.
 
 
 def _shortfall(value, floor):
@@ -2072,8 +2312,11 @@ def constraints(p, cl_max=None, deflection_deg=None):
         "packaging": jnp.maximum(0.0, -r["volume_slack"]) / 0.001,
         # Harness reach.  Both push against what the optimizer wants, so
         # without them it happily places hardware the wiring cannot reach.
-        "motor_reach": _excess(g["motor_y"], MAX_MOTOR_Y),
-        "servo_reach": _excess(g["servo_y"], MAX_SERVO_Y),
+        # Measured as the actual wire run from the flight controller -- which
+        # sits on the battery, not at the origin -- so sweep and the motor boom
+        # both count against the harness the way they really do.
+        "motor_reach": _excess(r["motor_wire"], MAX_MOTOR_WIRE),
+        "servo_reach": _excess(r["servo_wire"], MAX_SERVO_WIRE),
         # The servo must sit within the span of the elevon it drives, or the
         # pushrod would have to run diagonally across the wing to reach a horn
         # it does not line up with.  Both edges of the servo body are checked,
@@ -2103,32 +2346,31 @@ def constraints(p, cl_max=None, deflection_deg=None):
 
 
 def cost(p, cl_max=None, deflection_deg=None):
-    """Stall speed plus penalties for violated constraints.
+    """Stall speed, less the yaw authority earned, plus constraint penalties.
 
     A penalty method rather than a projection: the constraints couple through
     the geometry (thickness feeds mass feeds stall speed feeds Reynolds number),
     so there is no cheap feasible set to project onto, and squared shortfalls
     keep the whole thing differentiable for the same reason the linkage model
     smooths its dead-point penalty.
+
+    There are no tie-breaks in here.  Every direction the objective used to be
+    flat in is now priced by something real: motor position by the yaw authority
+    it buys, sweep and the motor standoff by the wire run and the boom mass they
+    cost.  A tie-break is an admission that the model cannot see a variable, and
+    the answer is to make it see, not to nudge it.
     """
     r = evaluate(p, cl_max=cl_max, deflection_deg=deflection_deg)
     violations = constraints(p, cl_max=cl_max, deflection_deg=deflection_deg)
     penalty = sum(v ** 2 for v in violations.values())
 
-    # Tie-break only.  See MOTOR_FRAC_PREFERENCE: the objective is exactly flat
-    # in motor position, so without this the answer is whichever random start
-    # survived, which is noise dressed up as a result.
-    g = unpack(p)
-    tiebreak = (MOTOR_FRAC_PREFERENCE - g["motor_y"] / (0.5 * SPAN)) ** 2
-
-    # The same for sweep, which the static margin constraint bounds from below
-    # but nothing bounds from above.  See LE_SWEEP_PREFERENCE: normalized by the
-    # bound's own scale so the weight means the same thing regardless of the box.
-    sweep_tiebreak = ((g["le_sweep_deg"] - LE_SWEEP_PREFERENCE) / 45.0) ** 2
+    # Yaw authority beyond the floor is worth having, so it is subtracted rather
+    # than merely permitted.  See YAW_AUTHORITY_WEIGHT: this is what makes the
+    # motors want to sit apart, in place of the tie-break that used to say so.
+    yaw_reward = jnp.abs(r["authority"]["cruise"]["alpha_yaw"])
 
     return (r["v_stall"] + CONSTRAINT_WEIGHT * penalty
-            + TIEBREAK_WEIGHT * tiebreak
-            + SWEEP_TIEBREAK_WEIGHT * sweep_tiebreak)
+            - YAW_AUTHORITY_WEIGHT * yaw_reward)
 
 
 cost_jit = jax.jit(cost)
@@ -2222,6 +2464,10 @@ def sensitivity(p, bounds, cl_max=None, deflection_deg=None):
 # ratio sane at this Reynolds number once the section is deep enough to hold
 # everything.
 BASELINE = jnp.array([
+    0.256,   # span, m.  The old fixed value, one printer bed, so that a
+             # baseline evaluation still describes the aircraft this model was
+             # built around and any stretch in the answer was optimized for
+             # rather than assumed.
     0.105,   # root_chord, m
     0.074,   # tip_chord, m  (taper 0.70; less taper keeps tip Re up)
     0.016,   # root_thickness, m
@@ -2235,6 +2481,10 @@ BASELINE = jnp.array([
              # roughly neutral against this taper; there is no stability model
              # here to choose it properly.
     BATTERY_STATION_DEFAULT,   # battery_station, chord fraction of its nose
+    3.0,     # motor_standoff_mm.  The old fixed value, which is 1 mm short of
+             # the tip clearance on its own -- kept as the baseline so the
+             # infeasibility it caused stays visible rather than being tuned
+             # away in the starting point.
     # Camber, as Glauert coefficients.  Started at A2 = A1, which is exactly
     # zero pitching moment: a neutral point that presupposes neither camber for
     # lift nor reflex for trim, and lets the optimizer decide which it wants.
@@ -2263,6 +2513,8 @@ def report(p=None, v_cruise=12.0, cl_max=None, deflection_deg=None):
                  deflection_deg=deflection_deg)
 
     print("=== Geometry ===")
+    print(f"  span            {float(g['span']) * 1e3:8.1f} mm"
+          f"   (cap {MAX_SPAN * 1e3:.0f} mm)")
     print(f"  root chord      {float(g['root_chord']) * 1e3:8.1f} mm")
     print(f"  tip chord       {float(g['tip_chord']) * 1e3:8.1f} mm"
           f"   (taper {float(g['tip_chord'] / g['root_chord']):.2f})")
@@ -2295,10 +2547,18 @@ def report(p=None, v_cruise=12.0, cl_max=None, deflection_deg=None):
           f"   (alpha {float(r['alpha_trim']):+.2f} deg at cruise)")
     print(f"  throw after trim{float(r['delta_geom_net']):8.1f} deg"
           f"   (of {float(r['delta_geom']):.1f} deg geometric)")
-    print(f"  prop clearance  {float(r['prop_clearance']) * 1e3:+8.1f} mm")
+    print(f"  motor wire      {float(r['motor_wire']) * 1e3:8.1f} mm"
+          f"   of {MAX_MOTOR_WIRE * 1e3:.0f} mm harness"
+          f" (FC at {float(r['fc_station']) * 1e3:.0f} mm aft of root LE)")
+    print(f"  servo wire      {float(r['servo_wire']) * 1e3:8.1f} mm"
+          f"   of {MAX_SERVO_WIRE * 1e3:.0f} mm harness")
+    print(f"  prop clearance  {float(r['prop_clearance']) * 1e3:+8.1f} mm"
+          f"   (standoff {float(g['motor_standoff_mm']):.1f} mm,"
+          f" motor at {float(r['motor_station']) * 1e3:+.1f} mm)")
 
     print("\n=== Mass and performance ===")
-    print(f"  all-up mass     {float(r['mass']) * 1e3:8.1f} g")
+    print(f"  all-up mass     {float(r['mass']) * 1e3:8.1f} g"
+          f"   (booms {float(r['boom_mass']) * 1e3:.1f} g of it)")
     print(f"  thrust/weight   {float(r['twr']):8.2f}"
           f"   {'OK' if float(r['twr']) > 1.0 else 'CANNOT HOVER'}")
     print(f"  wing loading    {float(r['wing_loading']):8.1f} N/m^2")
@@ -2334,15 +2594,15 @@ def report(p=None, v_cruise=12.0, cl_max=None, deflection_deg=None):
             - float(g["servo_chord_frac"]) - 0.5 * SERVO_LENGTH / sc) * sc,
         "servo outboard of battery": (
             float(g["servo_y"]) - 0.5 * SERVO_WIDTH),
-        "motor wiring reach": MAX_MOTOR_Y - float(g["motor_y"]),
-        "servo wiring reach": MAX_SERVO_Y - float(g["servo_y"]),
+        "motor wiring reach": MAX_MOTOR_WIRE - float(r["motor_wire"]),
+        "servo wiring reach": MAX_SERVO_WIRE - float(r["servo_wire"]),
         "servo inside elevon (in)": (
             float(g["servo_y"]) - 0.5 * SERVO_WIDTH
             - float(g["elevon_inboard_y"])),
         "servo inside elevon (out)": (
             float(g["elevon_outboard_y"])
             - float(g["servo_y"]) - 0.5 * SERVO_WIDTH),
-        "elevon tip anchor": 0.5 * SPAN - float(g["elevon_outboard_y"]),
+        "elevon tip anchor": 0.5 * float(g["span"]) - float(g["elevon_outboard_y"]),
     }
     binding = min(terms, key=terms.get)
     for name, value in terms.items():
@@ -2369,7 +2629,8 @@ def report(p=None, v_cruise=12.0, cl_max=None, deflection_deg=None):
     print(f"  elevon span     {float(g['elevon_inboard_y']) * 1e3:.0f}"
           f" to {float(g['elevon_outboard_y']) * 1e3:.0f} mm from centreline")
     print(f"  motor at        {float(g['motor_y']) * 1e3:8.1f} mm"
-          f"   ({float(g['motor_y']) / (0.5 * SPAN) * 100:.0f}% semi-span)")
+          f"   ({float(g['motor_y']) / (0.5 * float(g['span'])) * 100:.0f}%"
+          f" semi-span)")
     print(f"  wash fraction   {float(r['wash_fraction']):8.2f}"
           f"   of elevon span in the slipstream")
     print(f"  yaw moment      {float(r['yaw_moment']) * 1e3:8.2f} mN.m"

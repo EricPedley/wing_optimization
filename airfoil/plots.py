@@ -71,7 +71,8 @@ def planform_figure(p=None):
 
     root_c = float(g["root_chord"])
     tip_c = float(g["tip_chord"])
-    semi = 0.5 * am.SPAN
+    span = float(g["span"])
+    semi = 0.5 * span
     x_hinge = float(g["x_hinge"])
     ein = float(g["elevon_inboard_y"])
     eout = float(g["elevon_outboard_y"])
@@ -83,11 +84,11 @@ def planform_figure(p=None):
     def chord_at(y):
         # Through the model's own loft, so the constant-chord centre section
         # shows up in the drawing instead of only in the numbers.
-        return float(am.local_geometry(root_c, tip_c, 0.0, 0.0,
+        return float(am.local_geometry(span, root_c, tip_c, 0.0, 0.0,
                                        abs(y) / semi)[0])
 
     def le_at(y):
-        return float(am.leading_edge_x(abs(y) / semi, le_sweep))
+        return float(am.leading_edge_x(span, abs(y) / semi, le_sweep))
 
     # Hinge position, computed the same way the model does it, so the drawing
     # cannot disagree with the numbers.  With a constant-chord elevon this runs
@@ -134,15 +135,44 @@ def planform_figure(p=None):
     x_cg = float(r["cg_station"])
     x_ac = float(r["ac_station"])
     sm = float(r["static_margin"])
+
+    # The mass breakdown behind the CG, read from the model rather than
+    # recomputed here so the picture cannot disagree with the constraint.  Shown
+    # on hover: five items is too many to label on the plot, but "why is the CG
+    # there" is exactly the question this figure gets asked.
+    items = am.mass_items(
+        span, float(g["root_chord"]), float(g["tip_chord"]),
+        float(g["root_thickness"]), float(g["tip_thickness"]),
+        le_sweep, float(g["battery_station"]),
+        float(g["servo_chord_frac"]), float(g["servo_span_frac"]),
+        float(g["motor_standoff"]))
+    total = sum(float(m) for m, _ in items.values())
+    breakdown = "<br>".join(
+        f"{k}: {float(m) * 1e3:.1f} g at {float(s) * 1e3:+.0f} mm"
+        f" ({(float(s) - x_cg) * float(m) / total * 1e3:+.1f} mm pull)"
+        for k, (m, s) in items.items())
+
     fig.add_trace(go.Scatter(
         x=[0.0], y=[x_cg * 1e3], mode="markers",
-        marker={"color": "blue", "size": 12, "symbol": "circle-cross"},
+        marker={"color": "black", "size": 13, "symbol": "circle-cross"},
         name=f"CG ({x_cg * 1e3:.0f} mm)",
+        hovertemplate=f"CG {x_cg * 1e3:.1f} mm<br>{breakdown}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=[0.0], y=[x_ac * 1e3], mode="markers",
         marker={"color": "purple", "size": 11, "symbol": "diamond"},
         name=f"AC ({x_ac * 1e3:.0f} mm),  SM {sm * 100:+.1f}%",
+        hovertemplate=(f"Aerodynamic centre {x_ac * 1e3:.1f} mm<br>"
+                       f"static margin {sm * 100:+.1f}% MAC"
+                       f" (floor {am.MIN_STATIC_MARGIN * 100:.0f}%)"
+                       "<extra></extra>"),
+    ))
+    # The static margin itself, as the gap between the two.  Drawn on the
+    # centreline because that is where both markers sit.
+    fig.add_trace(go.Scatter(
+        x=[0.0, 0.0], y=[x_cg * 1e3, x_ac * 1e3],
+        mode="lines", line={"color": "purple", "width": 3, "dash": "dot"},
+        name=None, showlegend=False, hoverinfo="skip",
     ))
 
     # Hinge line, drawn only across the elevon span where it exists.
@@ -220,27 +250,68 @@ def planform_figure(p=None):
     # Wiring reach limits.  Drawn because they are the constraints most likely
     # to be forgotten when reading a planform: nothing about the shape shows
     # that the harness cannot reach further out.
-    for limit, colour, label in ((am.MAX_MOTOR_Y, "blue", "Motor reach"),
-                                 (am.MAX_SERVO_Y, "purple", "Servo reach")):
+    #
+    # An arc, not a spanwise line.  The limit is a length of wire from the
+    # flight controller, so what it bounds is a radius about the FC -- and on a
+    # swept wing the outboard stations are further aft, which spends that radius
+    # without going any further out.  Drawn as the locus so the picture shows
+    # the constraint the model applies rather than the spanwise simplification
+    # it used to.
+    x_fc = float(am.fc_station(root_c))
+    for limit, colour, label in ((am.MAX_MOTOR_WIRE, "blue", "Motor reach"),
+                                 (am.MAX_SERVO_WIRE, "purple", "Servo reach")):
+        arc = np.linspace(-np.pi / 2, np.pi / 2, 121)
         for sign in (1, -1):
             fig.add_trace(go.Scatter(
-                x=np.array([sign * limit, sign * limit]) * 1e3,
-                y=np.array([le_at(limit), te_at(limit)]) * 1e3,
+                x=sign * limit * np.cos(arc) * 1e3,
+                y=(x_fc + limit * np.sin(arc)) * 1e3,
                 mode="lines",
                 line={"color": colour, "width": 1, "dash": "longdash"},
                 name=label if sign == 1 else None,
                 showlegend=sign == 1, hoverinfo="skip",
             ))
 
-    # Props, drawn centred on the leading edge at their spanwise station, which
-    # sweeps aft with it.
+    # Motors and props, drawn where the model actually puts them, which is
+    # *ahead* of the leading edge rather than on it.  The mount pad stands proud
+    # by the motor standoff so it is a flat face instead of a knife edge, the
+    # body occupies MOTOR_BODY_LENGTH forward of that, and the prop disc sits at
+    # its front.  Drawing the disc on the leading edge -- which is what this did
+    # before the motor station was modelled -- hides both the standoff and the
+    # only mass on the aircraft that sits forward of the wing.
     theta = np.linspace(0, 2 * np.pi, 60)
+    standoff = float(g["motor_standoff"])
+    prop_y = le_at(motor_y) - standoff - am.MOTOR_BODY_LENGTH
+    body_y0 = le_at(motor_y) - standoff
+    motor_x = float(am.motor_station(standoff)) + le_at(motor_y)
     for sign in (1, -1):
         fig.add_trace(go.Scatter(
             x=(sign * motor_y + 0.5 * am.PROP_DIAMETER * np.cos(theta)) * 1e3,
-            y=(le_at(motor_y) + 0.5 * am.PROP_DIAMETER * np.sin(theta)) * 1e3,
+            y=(prop_y + 0.5 * am.PROP_DIAMETER * np.sin(theta)) * 1e3,
             mode="lines", line={"color": "blue", "width": 2},
             name="Prop disc" if sign == 1 else None,
+            showlegend=sign == 1, hoverinfo="skip",
+        ))
+        # Motor body, between the prop plane and the mount face on the wing.
+        half_body = 0.5 * am.PROP_DIAMETER * 0.18
+        fig.add_trace(go.Scatter(
+            x=(sign * motor_y + np.array([-half_body, half_body, half_body,
+                                          -half_body, -half_body])) * 1e3,
+            y=np.array([prop_y, prop_y, body_y0, body_y0, prop_y]) * 1e3,
+            mode="lines", line={"color": "blue", "width": 1},
+            fill="toself", fillcolor="rgba(80,80,220,0.25)",
+            name="Motor body" if sign == 1 else None,
+            showlegend=sign == 1, hoverinfo="skip",
+        ))
+        # Where the motor's mass acts -- the only item forward of the wing, and
+        # so the only one pulling the centre of gravity the right way.
+        fig.add_trace(go.Scatter(
+            x=[sign * motor_y * 1e3], y=[motor_x * 1e3],
+            mode="markers",
+            marker={"color": "blue", "size": 8, "symbol": "x-thin",
+                    "line": {"color": "blue", "width": 2}},
+            name=(f"Motor mass ({am.MOTOR_MASS * 1e3:.1f} g, "
+                  f"{float(am.motor_station(standoff)) * 1e3:+.0f} mm)")
+            if sign == 1 else None,
             showlegend=sign == 1, hoverinfo="skip",
         ))
 
@@ -381,6 +452,7 @@ def section_figure(p=None):
     # camber -- a different shape.  Drawing it against the root section would
     # show it fitting in room that does not exist where it actually lives.
     sv_a1, sv_a2 = am.local_camber(
+        float(g["span"]),
         float(g["camber_a1"]), float(g["camber_a2"]),
         float(g["tip_camber_a1"]), float(g["tip_camber_a2"]),
         float(g["servo_span_frac"]))
@@ -580,6 +652,7 @@ def dashboard(p=None, label=None):
 # the displayed unit; the gradient is divided by it so it stays "per displayed
 # unit" and the numbers are comparable.
 _VAR_UNITS = {
+    "span": ("mm", 1e3),
     "root_chord": ("mm", 1e3),
     "tip_chord": ("mm", 1e3),
     "root_thickness": ("mm", 1e3),
@@ -596,6 +669,7 @@ _VAR_UNITS = {
     "servo_span_frac": ("% semi", 1e2),
     "le_sweep_deg": ("deg", 1.0),
     "battery_station": ("% chord", 1e2),
+    "motor_standoff_mm": ("mm", 1.0),
 }
 
 

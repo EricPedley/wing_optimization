@@ -291,17 +291,19 @@ def expected_points(p=None):
 
     g = am.unpack(p)
     r = am.evaluate(p)
-    semi = 0.5 * am.SPAN
+    span = float(g["span"])
+    semi = 0.5 * span
     mm = 1e3
 
     root_chord = float(g["root_chord"])
     tip_chord = float(g["tip_chord"])
-    tip_le = float(am.leading_edge_x(1.0, float(g["le_sweep_deg"])))
+    tip_le = float(am.leading_edge_x(span, 1.0, float(g["le_sweep_deg"])))
     mac = float(r["mac"])
     elevon_chord = float(am.elevon_chord_at(mac, float(g["x_hinge"]), mac))
 
     def le_at(y):
-        return float(am.leading_edge_x(y / semi, float(g["le_sweep_deg"])))
+        return float(am.leading_edge_x(span, y / semi,
+                                       float(g["le_sweep_deg"])))
 
     def chord_at(y):
         """Local chord at a spanwise station, in metres.
@@ -313,7 +315,7 @@ def expected_points(p=None):
         comparison against CAD is exactly what caught.
         """
         return float(am.local_geometry(
-            root_chord, tip_chord,
+            span, root_chord, tip_chord,
             float(g["root_thickness"]), float(g["tip_thickness"]),
             y / semi)[0])
 
@@ -322,7 +324,7 @@ def expected_points(p=None):
 
     # Outboard edge of the constant-chord centre section, where the leading
     # edge starts to rake aft and the chord starts to taper.
-    y0 = float(am.root_section_fraction()) * semi
+    y0 = float(am.root_section_fraction(span)) * semi
 
     return {
         "rootLE_x": 0.0, "rootLE_y": 0.0,
