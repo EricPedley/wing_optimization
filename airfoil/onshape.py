@@ -45,6 +45,7 @@ import urllib.request
 from pathlib import Path
 
 import airfoil.airfoil_model as am
+import airfoil.onshape_export as onshape_export
 import airfoil.optimize as opt
 
 BASE_URL = "https://cad.onshape.com"
@@ -236,6 +237,10 @@ def design_variables(p):
         "le_sweep_deg": ANGLE,
         "battery_station": NUMBER,
         "motor_standoff_mm": LENGTH,
+        "camber_a1": NUMBER,
+        "camber_a2": NUMBER,
+        "tip_camber_da1": NUMBER,
+        "tip_camber_da2": NUMBER,
         "servo_height": LENGTH,
         "servo_rod_dy": LENGTH,
         "servo_travel_mm": LENGTH,
@@ -256,6 +261,10 @@ def design_variables(p):
         "le_sweep_deg": "Leading-edge sweep, positive aft",
         "battery_station": "Battery forward face, fraction of root chord",
         "motor_standoff_mm": "Motor mount pad, proud of the leading edge",
+        "camber_a1": "Root camber, first Birnbaum-Glauert coefficient",
+        "camber_a2": "Root camber, second Birnbaum-Glauert coefficient",
+        "tip_camber_da1": "Tip camber A1, as an increment on the root",
+        "tip_camber_da2": "Tip camber A2, as an increment on the root",
         "servo_height": "Servo body depth off the hinge axis",
         "servo_rod_dy": "Control rod pickup, offset from the servo body",
         "servo_travel_mm": "Servo stroke",
@@ -395,9 +404,55 @@ def derived_variables(p):
             for name, var_type, value, note in entries]
 
 
+def spline_variables(p):
+    """Root and tip section outlines, as fitted cubic-spline control points.
+
+    ``camber_line``/``thickness_at`` are closed-form, not a point table, so
+    there is nothing here for a sketch spline to reference directly.  This
+    fits a cubic B-spline through each surface (see
+    :mod:`airfoil.onshape_export` for the fit itself, including why the
+    knots are sqrt-spaced) and writes the control points as LENGTH pairs, so
+    a sketch spline pinned to them tracks the model the same way every other
+    dimension in this studio does.
+
+    Named ``cad_spline_<station>_<surface>_<point>_{x,y}``, where ``point``
+    is ``start_anchor`` / ``start_tangent_handle`` / ``cpN`` /
+    ``end_tangent_handle`` / ``end_anchor`` -- the same labels
+    :func:`airfoil.onshape_export.point_label` prints, so the name in the
+    variable table matches the point you are placing in Onshape's spline
+    tool.
+    """
+    g = am.unpack(p)
+    stations = [
+        ("root", float(g["root_chord"]), float(g["root_thickness"]),
+         float(g["camber_a1"]), float(g["camber_a2"])),
+        ("tip", float(g["tip_chord"]), float(g["tip_thickness"]),
+         float(g["tip_camber_a1"]), float(g["tip_camber_a2"])),
+    ]
+
+    entries = []
+    for station_name, chord_m, thickness_m, a1, a2 in stations:
+        pts = onshape_export.section_control_points(chord_m, thickness_m, a1, a2)
+        for surface in ("upper", "lower"):
+            control_points_mm, _ = pts[surface]
+            n_control = len(control_points_mm)
+            for i, (px_mm, py_mm) in enumerate(control_points_mm):
+                point_name = onshape_export.point_label(i, n_control)
+                prefix = f"cad_spline_{station_name}_{surface}_{point_name}"
+                entries.append((f"{prefix}_x", LENGTH, px_mm / 1e3,
+                                f"{station_name} {surface} surface, "
+                                f"{point_name} X"))
+                entries.append((f"{prefix}_y", LENGTH, py_mm / 1e3,
+                                f"{station_name} {surface} surface, "
+                                f"{point_name} Y"))
+
+    return [_variable(name, var_type, value, note)
+            for name, var_type, value, note in entries]
+
+
 def build_payload(p):
     """The full variable list this module writes to the studio."""
-    return design_variables(p) + derived_variables(p)
+    return design_variables(p) + derived_variables(p) + spline_variables(p)
 
 
 # --- Reading and writing ------------------------------------------------------
