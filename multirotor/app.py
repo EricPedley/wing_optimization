@@ -6,16 +6,31 @@ is measured against; the optimizer (multirotor.fastopt) runs automatically
 whenever an input settles and its result is held separately from the
 sliders, applied to them only on request.
 
-What is specific to this model, versus the linkage app: the five design
-variables (kV, stator volume, prop diameter, blade count, pitch) don't by
-themselves have a "good" direction the way linkage geometry does, so instead
-of a single fixed objective this lets the user choose which one of four
-output quantities (TWR, current draw, spin-up time, tip Mach) to optimize,
-and turn the other three on or off as constraints with adjustable
-thresholds -- this is the "tweak constraints and objective" part. The
-"tweak assumptions" part is the four physical-assumption sliders (battery
-voltage, other-component mass, and the two aerodynamic constants this
-session's bench-data calibration left with the widest uncertainty bands).
+What is specific to this model, versus the linkage app:
+
+- The four continuous design variables (kV, stator volume, prop diameter,
+  pitch) don't by themselves have a "good" direction the way linkage
+  geometry does, so instead of a single fixed objective this lets the user
+  choose which one of four output quantities (TWR, current draw, spin-up
+  time, tip Mach) to optimize, and turn the other three on or off as
+  constraints with adjustable thresholds.
+- Blade count is physically discrete (2 or 3 blades, not 2.4), so it is not
+  a continuous slider at all: every optimizer run is two full rollouts, one
+  with blade count fixed at 2 and one at 3 (fastopt.optimize_over_blade_counts),
+  and the app shows whichever converged to the better cost.
+- Prop diameter is shown in mm and pitch in inches (the units these are
+  actually specified in), converted to/from the model's native SI units
+  (metres) at the UI boundary; prop diameter is capped at 3 inches, a
+  packaging limit for the frame this is being sized for.
+- "Tweak assumptions" covers battery voltage, other-component mass, and the
+  two aerodynamic constants this session's bench-data calibration left with
+  the widest uncertainty bands (CL_ALPHA, the induced power factor).
+- A stator-volume readout also shows the two closest off-the-shelf motor
+  sizes (see quad_model.REALISTIC_STATOR_SIZES) and how far off their
+  volumes are, since stator_volume_mm3 is continuous but motors are not.
+- A hover flight-time estimate (quad_model.hover_point) for a
+  user-adjustable battery capacity, since TWR and the current constraint are
+  both evaluated at full throttle and say nothing about endurance.
 """
 
 import threading
@@ -28,12 +43,25 @@ from plotly.subplots import make_subplots
 import multirotor.fastopt as fo
 import multirotor.quad_model as qm
 
+MM_PER_M = 1e3
+IN_PER_M = 1.0 / 25.4e-3
+
+# Each design param carries its own display unit via si_scale: the slider
+# shows value in that unit, and value * si_scale is what the model (which
+# works in kV, mm^3, and SI metres) actually receives. "var" is the
+# quad_model.DESIGN_VARS key it maps to -- kept explicit rather than derived
+# from the slider id, so a UI id can read naturally (e.g. "prop-diameter")
+# without having to spell out the backend variable name.
 DESIGN_PARAMS = [
-    {"id": "kv", "name": "Motor kV (rpm/V)", "min": 3000, "max": 30000, "step": 50, "value": 18000},
-    {"id": "stator-volume-mm3", "name": "Stator volume (mm³)", "min": 150, "max": 800, "step": 5, "value": 300},
-    {"id": "prop-diameter-m", "name": "Prop diameter (m)", "min": 0.03, "max": 0.09, "step": 0.001, "value": 0.05},
-    {"id": "blade-count", "name": "Blade count", "min": 2, "max": 5, "step": 0.1, "value": 3},
-    {"id": "pitch-m", "name": "Pitch (m)", "min": 0.01, "max": 0.08, "step": 0.001, "value": 0.03},
+    {"id": "kv", "var": "kv", "name": "Motor kV (rpm/V)",
+     "min": 3000, "max": 30000, "step": 50, "value": 18000, "si_scale": 1.0},
+    {"id": "stator-volume", "var": "stator_volume_mm3", "name": "Stator volume (mm³)",
+     "min": 150, "max": 800, "step": 5, "value": 300, "si_scale": 1.0},
+    {"id": "prop-diameter", "var": "prop_diameter_m", "name": "Prop diameter (mm)",
+     "min": 20.0, "max": qm.MAX_PROP_DIAMETER_M * MM_PER_M, "step": 0.5, "value": 50.0,
+     "si_scale": 1.0 / MM_PER_M},
+    {"id": "pitch", "var": "pitch_m", "name": "Pitch (in)",
+     "min": 0.4, "max": 3.2, "step": 0.05, "value": 1.2, "si_scale": 1.0 / IN_PER_M},
 ]
 
 ASSUMPTION_PARAMS = [
@@ -45,6 +73,9 @@ ASSUMPTION_PARAMS = [
     {"id": "induced-power-factor", "name": "Induced power factor κ", "min": 1.0, "max": 3.0, "step": 0.05,
      "value": fo.ASSUMPTION_DEFAULTS["induced_power_factor"]},
 ]
+
+BATTERY_PARAM = {"id": "battery-mah", "name": "Battery capacity (mAh)",
+                  "min": 150, "max": 1500, "step": 10, "value": 680}
 
 CONSTRAINT_OPTIONS = [
     {"label": "= (locked)", "value": "fixed"},
@@ -59,14 +90,20 @@ OBJECTIVE_OPTIONS = [
     {"label": "Minimize current at full throttle", "value": "current_a"},
     {"label": "Minimize spin-up time (10%→90% throttle)", "value": "spin_up_s"},
     {"label": "Minimize tip Mach at full throttle", "value": "tip_mach"},
+    {"label": "Minimize current at a chosen throttle (TWR as a floor)",
+     "value": "current_at_throttle"},
 ]
+
+OBJECTIVE_THROTTLE_PARAM = {"id": "objective-throttle", "name": "Flight condition throttle (%)",
+                             "min": 5, "max": 100, "step": 1,
+                             "value": fo.DEFAULT_OBJECTIVE_THROTTLE_FRAC * 100}
 
 QUANTITIES = fo.QUANTITIES
 N_SWEEP = 41
-
-
-def _var_name(param_id):
-    return param_id.replace("-", "_")
+# Blade count when the user has turned optimization off -- there is no
+# slider for it (it is only ever chosen by the two-rollout comparison), so
+# the "just show me the sliders" path needs some default to evaluate with.
+DEFAULT_BLADE_COUNT_WHEN_UNOPTIMIZED = 3.0
 
 
 def _design_slider(p):
@@ -87,6 +124,7 @@ def _design_slider(p):
                 ],
                 style={"display": "flex", "alignItems": "center", "gap": "10px"},
             ),
+            html.Div(id=f"{p['id']}-note", style={"fontSize": "0.8em", "color": "#888"}),
         ],
         style={"padding": "10px"},
     )
@@ -135,9 +173,10 @@ app.layout = html.Div(
     [
         html.H1("Quad Propulsion Design"),
         html.P(
-            "Free variables: motor kV, stator volume, propeller diameter, blade count, "
-            "and pitch. Pick which output to optimize, which to hold as a constraint, "
-            "and tweak the assumptions below to see how the design point moves.",
+            "Free variables: motor kV, stator volume, propeller diameter, and pitch "
+            "(blade count is optimized separately over 2 and 3 blades, since it's "
+            "physically discrete). Pick which output to optimize, which to hold as a "
+            "constraint, and tweak the assumptions below to see how the design point moves.",
             style={"color": "#555"},
         ),
         html.Div(
@@ -166,6 +205,25 @@ app.layout = html.Div(
                         html.Label("Objective", style={"fontWeight": "bold"}),
                         dcc.Dropdown(id="objective", options=OBJECTIVE_OPTIONS,
                                      value="twr", clearable=False),
+                        html.Div(
+                            [
+                                html.Label(OBJECTIVE_THROTTLE_PARAM["name"],
+                                           style={"fontSize": "0.85em", "color": "#666"}),
+                                dcc.Slider(
+                                    id=OBJECTIVE_THROTTLE_PARAM["id"],
+                                    min=OBJECTIVE_THROTTLE_PARAM["min"],
+                                    max=OBJECTIVE_THROTTLE_PARAM["max"],
+                                    step=OBJECTIVE_THROTTLE_PARAM["step"],
+                                    value=OBJECTIVE_THROTTLE_PARAM["value"],
+                                    tooltip={"placement": "bottom", "always_visible": False},
+                                ),
+                                html.Div(
+                                    "Only used by \"Minimize current at a chosen throttle\".",
+                                    style={"fontSize": "0.75em", "color": "#999"},
+                                ),
+                            ],
+                            style={"paddingTop": "8px"},
+                        ),
                         html.Button(
                             "Apply result to sliders", id="apply-result", n_clicks=0,
                             style={"marginTop": "10px", "padding": "8px 14px",
@@ -184,6 +242,22 @@ app.layout = html.Div(
             style={"display": "flex", "gap": "24px", "padding": "10px",
                    "border": "1px solid #ddd", "borderRadius": "6px", "margin": "10px",
                    "flexWrap": "wrap"},
+        ),
+        html.Div(
+            [
+                html.H3("Hover flight time"),
+                html.Div(
+                    dcc.Slider(
+                        id=BATTERY_PARAM["id"], min=BATTERY_PARAM["min"], max=BATTERY_PARAM["max"],
+                        step=BATTERY_PARAM["step"], value=BATTERY_PARAM["value"],
+                        tooltip={"placement": "bottom", "always_visible": False},
+                    ),
+                    style={"maxWidth": "400px"},
+                ),
+                html.Div(id="hover-readout", style={"paddingTop": "8px", "fontFamily": "monospace"}),
+            ],
+            style={"padding": "10px", "border": "1px solid #ddd", "borderRadius": "6px",
+                   "margin": "10px"},
         ),
         dcc.Graph(id="sweep-graph", style={"height": "650px"}),
         dcc.Store(id="design"),
@@ -227,6 +301,7 @@ def sync_objective_rows(objective, *enable_states):
     [Input(f"{p['id']}-constraint", "value") for p in DESIGN_PARAMS],
     [Input(p["id"], "value") for p in ASSUMPTION_PARAMS],
     Input("objective", "value"),
+    Input(OBJECTIVE_THROTTLE_PARAM["id"], "value"),
     [Input(f"{q}-enable", "value") for q in QUANTITIES],
     [Input(f"{q}-threshold", "value") for q in QUANTITIES],
 )
@@ -238,13 +313,24 @@ def run_optimization(*state):
     assumption_values = state[a:a + len(ASSUMPTION_PARAMS)]
     b = a + len(ASSUMPTION_PARAMS)
     objective = state[b]
+    objective_throttle_pct = state[b + 1]
+    c = b + 2
     nq = len(QUANTITIES)
-    enable_values = state[b + 1:b + 1 + nq]
-    threshold_values = state[b + 1 + nq:b + 1 + 2 * nq]
+    enable_values = state[c:c + nq]
+    threshold_values = state[c + nq:c + 2 * nq]
 
-    values = {_var_name(p["id"]): float(v) for p, v in zip(DESIGN_PARAMS, slider_values)}
-    modes = {_var_name(p["id"]): m for p, m in zip(DESIGN_PARAMS, constraint_modes)}
-    ranges = {_var_name(p["id"]): (float(p["min"]), float(p["max"])) for p in DESIGN_PARAMS}
+    # Convert display units (mm, inches) to the model's native SI units at
+    # this boundary; everything downstream of `values` is in kV/mm^3/metres.
+    values = {p["var"]: float(v) * p["si_scale"] for p, v in zip(DESIGN_PARAMS, slider_values)}
+    modes = {p["var"]: m for p, m in zip(DESIGN_PARAMS, constraint_modes)}
+    ranges = {p["var"]: (float(p["min"]) * p["si_scale"], float(p["max"]) * p["si_scale"])
+              for p in DESIGN_PARAMS}
+    # blade_count has no slider; give it a placeholder so the DESIGN_VARS
+    # dict is complete. optimize_over_blade_counts overrides it per rollout;
+    # the "no optimization" path below overrides it with a fixed default.
+    values["blade_count"] = DEFAULT_BLADE_COUNT_WHEN_UNOPTIMIZED
+    modes["blade_count"] = "free"
+    ranges["blade_count"] = (2.0, 3.0)
 
     assumptions = {
         "vbat": float(assumption_values[0]),
@@ -257,33 +343,94 @@ def run_optimization(*state):
 
     if objective == "none":
         design = {"values": values, "assumptions": assumptions, "optimized": False}
-        return design, html.Div("Optimization off — showing the slider design.",
+        return design, html.Div("Optimization off — showing the slider design "
+                                 f"({int(DEFAULT_BLADE_COUNT_WHEN_UNOPTIMIZED)} blades assumed).",
                                  style={"color": "#666"})
 
-    result = fo.optimize(values, modes, ranges, objective, enabled, thresholds, assumptions)
-    design = {"values": result["values"], "assumptions": assumptions, "optimized": True}
-    return design, _status(result, objective)
+    best, rollouts = fo.optimize_over_blade_counts(
+        values, modes, ranges, objective, enabled, thresholds, assumptions,
+        objective_throttle_frac=float(objective_throttle_pct) / 100.0)
+    design = {"values": best["values"], "assumptions": assumptions, "optimized": True}
+    return design, _status(best, rollouts, objective, enabled, thresholds, assumptions)
 
 
-def _status(result, objective):
-    start, best = result["start_metrics"], result["best_metrics"]
+def _status(best, rollouts, objective, enabled, thresholds, assumptions):
+    start, bm = best["start_metrics"], best["best_metrics"]
     lines = [
-        html.Div(f"{result['message']}  ({result['elapsed'] * 1000:.0f} ms, "
-                 f"{result['n_free']} free variable(s))", style={"fontWeight": "bold"}),
+        html.Div(f"{best['message']}  ({best['elapsed'] * 1000:.0f} ms, "
+                 f"{best['n_free']} free variable(s), "
+                 f"winning blade count: {int(best['blade_count'])})",
+                 style={"fontWeight": "bold"}),
+        html.Div(
+            "  ".join(f"{int(r['blade_count'])} blades → "
+                      f"{fo.OBJECTIVE_LABELS[objective].split(',')[0]}="
+                      f"{r['best_metrics'][objective]:.4g}"
+                      for r in rollouts),
+            style={"color": "#666", "fontSize": "0.85em"},
+        ),
     ]
-    if objective in fo.QUANTITY_LABELS:
-        label = fo.QUANTITY_LABELS[objective]
-        lines.append(html.Div(f"{label}: {start[objective]:.4g} → {best[objective]:.4g}"))
+    if objective in fo.OBJECTIVE_LABELS:
+        label = fo.OBJECTIVE_LABELS[objective]
+        lines.append(html.Div(f"{label}: {start[objective]:.4g} → {bm[objective]:.4g}"))
+
+    # --- Constraint slacks, same idea as airfoil/optimize.py's printed
+    # constraint table: what the optimizer was actually held to, and whether
+    # it ended up sitting exactly on a limit, comfortably inside it, or (if
+    # the penalty couldn't fully satisfy it) still over.
+    lines.append(html.Div("Constraints:", style={"fontWeight": "bold", "paddingTop": "6px"}))
     for q in QUANTITIES:
         if q == objective:
+            lines.append(html.Div(f"  {fo.QUANTITY_LABELS[q]}: {bm[q]:.4g}  (this run's objective)",
+                                   style={"color": "#666", "fontSize": "0.9em"}))
             continue
-        lines.append(html.Div(f"{fo.QUANTITY_LABELS[q]}: {best[q]:.4g}",
-                               style={"color": "#666", "fontSize": "0.9em"}))
+        if not enabled.get(q):
+            lines.append(html.Div(f"  {fo.QUANTITY_LABELS[q]}: {bm[q]:.4g}  (not constrained)",
+                                   style={"color": "#999", "fontSize": "0.9em"}))
+            continue
+        threshold = thresholds[q]
+        sense = fo.QUANTITY_SENSE[q]
+        slack = (bm[q] - threshold) if sense == "max" else (threshold - bm[q])
+        limit_desc = f"{'≥' if sense == 'max' else '≤'} {threshold:.4g}"
+        if slack < -1e-6:
+            marker, color = f"  VIOLATED by {-slack:.4g}", "crimson"
+        elif slack < 1e-3 * max(abs(threshold), 1.0):
+            marker, color = "  binding (at the limit)", "darkorange"
+        else:
+            marker, color = f"  slack {slack:.4g}", "#2a2"
+        lines.append(html.Div(f"  {fo.QUANTITY_LABELS[q]}: {bm[q]:.4g}  ({limit_desc}){marker}",
+                               style={"color": color, "fontSize": "0.9em"}))
+
+    # --- Weight breakdown ---------------------------------------------------
+    unit = bm["unit"]
+    other_g = assumptions["other_mass_kg"] * 1e3
+    motors_g = unit["motor_mass"] * 4.0 * 1e3
+    props_g = unit["prop_mass"] * 4.0 * 1e3
+    propulsion_g = motors_g + props_g
+    total_g = bm["total_mass"] * 1e3
+    lines.append(html.Div("Weight breakdown:", style={"fontWeight": "bold", "paddingTop": "6px"}))
     lines.append(html.Div(
-        "  ".join(f"{p['name'].split(' (')[0]}={best_v:.4g}"
-                  for p, best_v in zip(DESIGN_PARAMS,
-                                       (result["values"][_var_name(p["id"])]
-                                        for p in DESIGN_PARAMS))),
+        f"  Everything else: {other_g:.2f} g   |   Propulsion (4x motor+prop): "
+        f"{propulsion_g:.2f} g   |   Total: {total_g:.2f} g",
+        style={"fontSize": "0.9em"},
+    ))
+    lines.append(html.Div(
+        f"  Propulsion split — motors: {motors_g:.2f} g ({unit['motor_mass'] * 1e3:.3f} g each)"
+        f"   props: {props_g:.2f} g ({unit['prop_mass'] * 1e3:.3f} g each)",
+        style={"color": "#666", "fontSize": "0.85em"},
+    ))
+
+    nearest = qm.nearest_stator_sizes(best["values"]["stator_volume_mm3"])
+    lines.append(html.Div(
+        "Nearest realistic stator sizes: " + ", ".join(
+            f"{s['name']} ({s['volume_mm3']:.0f}mm³, {s['delta_pct']:+.1f}%)" for s in nearest),
+        style={"color": "#666", "fontSize": "0.85em"},
+    ))
+
+    v = best["values"]
+    lines.append(html.Div(
+        f"kV={v['kv']:.4g}  Stator volume={v['stator_volume_mm3']:.4g}mm³  "
+        f"Diameter={v['prop_diameter_m'] * MM_PER_M:.4g}mm  "
+        f"Pitch={v['pitch_m'] * IN_PER_M:.4g}in  Blades={int(v['blade_count'])}",
         style={"paddingTop": "6px", "fontFamily": "monospace", "fontSize": "0.85em"},
     ))
     return lines
@@ -299,7 +446,7 @@ def apply_result(_n_clicks, design):
     if not design or not design.get("optimized"):
         return [no_update] * len(DESIGN_PARAMS)
     values = design["values"]
-    return [round(values[_var_name(p["id"])], 6) for p in DESIGN_PARAMS]
+    return [round(values[p["var"]] / p["si_scale"], 6) for p in DESIGN_PARAMS]
 
 
 # --- Live current-value readouts on each constraint row -----------------------
@@ -318,6 +465,36 @@ def update_quantity_readouts(design):
                                   design["assumptions"]["cl_alpha"],
                                   design["assumptions"]["induced_power_factor"])
     return [f"current: {float(r[q]):.4g}" for q in QUANTITIES]
+
+
+# --- Hover flight time ---------------------------------------------------------
+
+
+@callback(
+    Output("hover-readout", "children"),
+    Input("design", "data"),
+    Input(BATTERY_PARAM["id"], "value"),
+)
+def update_hover_readout(design, battery_mah):
+    if not design:
+        return no_update
+    x = np.array([design["values"][k] for k in fo.DESIGN_VARS])
+    a = design["assumptions"]
+    r = qm.hover_point(x, battery_mah=battery_mah, vbat=a["vbat"], other_mass_kg=a["other_mass_kg"],
+                        cl_alpha=a["cl_alpha"], induced_power_factor=a["induced_power_factor"])
+    if not r["feasible"]:
+        return html.Div("Cannot hover — max thrust at full throttle is below the "
+                         "vehicle's weight.", style={"color": "crimson"})
+    return html.Div([
+        html.Div(f"Hover throttle: {r['hover_throttle_frac'] * 100:.1f}%"),
+        html.Div(f"Hover current (all 4 motors): {r['hover_current_a_total']:.2f} A"),
+        html.Div(f"Estimated hover flight time on {int(r['battery_mah'])} mAh: "
+                 f"{r['flight_time_min']:.1f} min",
+                 style={"fontWeight": "bold"}),
+        html.Div("No reserve margin included -- this is time to fully discharge at a "
+                  "constant hover load, not a safe usable flight time.",
+                  style={"fontSize": "0.8em", "color": "#888"}),
+    ])
 
 
 # --- Throttle-sweep plot -------------------------------------------------------
@@ -359,7 +536,7 @@ def update_sweep(design):
 
     fig.update_layout(
         title=f"Throttle sweep — {'optimized' if design.get('optimized') else 'slider'} design "
-              f"(battery {a['vbat']:.1f}V)",
+              f"({int(v['blade_count'])} blades, battery {a['vbat']:.1f}V)",
         showlegend=False, margin={"l": 50, "r": 30, "t": 80, "b": 40},
     )
     return fig

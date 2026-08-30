@@ -94,6 +94,13 @@ OTHER_MASS_KG = 0.040
 # constraint or the objective.
 PLACEHOLDER_MOTOR_RTH = 12.0
 
+# Hard packaging limit for this build: the frame this is being sized for
+# cannot fit a bigger prop. Not derived from anything in the physics model --
+# it is an airframe constraint, so it belongs here as a bound the app applies
+# to the design-variable box, not as a penalty term competing with the
+# physical constraints.
+MAX_PROP_DIAMETER_M = 3.0 * 25.4e-3  # 3 inches
+
 DESIGN_VARS = ("kv", "stator_volume_mm3", "prop_diameter_m", "blade_count",
                "pitch_m")
 
@@ -192,6 +199,34 @@ def evaluate(x, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
                 **full_throttle)
 
 
+def current_at_throttle_a(x, throttle_frac, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
+                           chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
+                           cl_alpha=pa.CL_ALPHA, cd0=pa.CD0,
+                           induced_power_factor=pa.INDUCED_POWER_FACTOR):
+    """Per-motor current at an arbitrary throttle fraction, not just full
+    throttle.
+
+    Separate from evaluate() because TWR and the current constraint there are
+    deliberately worst-case (full throttle); this is for the opposite
+    question -- "how much current does this design draw at the throttle it
+    will actually spend most of a flight at" -- e.g. minimizing current at a
+    cruise/loiter throttle instead of minimizing it where it is already
+    capped by the ESC. other_mass_kg is accepted only so this function's
+    signature matches evaluate()'s and can be driven by the same "assumptions"
+    bundle app.py passes around; mass does not otherwise enter this
+    calculation, since current at a given throttle does not depend on it.
+    """
+    g = unpack(x)
+    unit = motor_prop_unit(g["kv"], g["stator_volume_mm3"], g["prop_diameter_m"],
+                            g["blade_count"], g["pitch_m"], chord_to_diameter_ratio,
+                            cl_alpha, cd0, induced_power_factor)
+    r = mm.equilibrium(throttle_frac * vbat, vel, g["kv"], unit["resistance"], unit["i0"],
+                        PLACEHOLDER_MOTOR_RTH, unit["prop_a_factor"], unit["prop_torque_factor"],
+                        unit["prop_max_rpm"], unit["thrust_factor_x"], unit["thrust_factor_y"],
+                        unit["thrust_factor_z"])
+    return r["current_a"]
+
+
 def throttle_sweep(x, throttle_fracs, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
                     chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
                     cl_alpha=pa.CL_ALPHA, cd0=pa.CD0,
@@ -221,6 +256,125 @@ def throttle_sweep(x, throttle_fracs, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MA
     rpm, thrust_n, current_a, tip_mach = jax.vmap(at_throttle)(throttle_fracs)
     return {"throttle_frac": throttle_fracs, "rpm": rpm, "thrust_n": thrust_n,
             "current_a": current_a, "tip_mach": tip_mach}
+
+
+# --- Realistic stator sizes ---------------------------------------------------
+#
+# stator_volume_mm3 is a continuous design variable so the optimizer can
+# search it freely, but a motor only actually ships in a handful of sizes.
+# This is the catalogue of sizes worth building against -- the ones a small
+# 1S whoop/toothpick build (the class this design targets) is actually sold
+# in -- so a continuous answer can be read off against real parts rather
+# than left as an abstract mm^3 number.
+REALISTIC_STATOR_SIZES = [
+    ("1002", 10.0, 2.0), ("1102", 11.0, 2.0), ("1103", 11.0, 3.0),
+    ("1104", 11.0, 4.0), ("1202.5", 12.0, 2.5), ("1203", 12.0, 3.0),
+    ("1204", 12.0, 4.0),
+]
+
+
+def nearest_stator_sizes(volume_mm3, n=2):
+    """The n catalogue sizes (see REALISTIC_STATOR_SIZES) closest in volume
+    to a continuous design's stator_volume_mm3, nearest first.
+
+    Ranked by absolute volume difference, not kV/R fit -- two sizes can have
+    the same volume from a very different diameter/height split (e.g. 1102
+    and 1104 differ a lot in shape despite both being "close" in volume to
+    something between them), which this ranking does not distinguish. Good
+    enough for "which off-the-shelf part is closest", not a substitute for
+    checking the actual diameter/height split fits the build.
+    """
+    volume_mm3 = float(volume_mm3)
+    scored = []
+    for name, diameter_mm, height_mm in REALISTIC_STATOR_SIZES:
+        v = ms.stator_volume_mm3(diameter_mm, height_mm)
+        delta = v - volume_mm3
+        scored.append({
+            "name": name, "volume_mm3": v, "delta_mm3": delta,
+            "delta_pct": 100.0 * delta / volume_mm3 if volume_mm3 > 0 else 0.0,
+        })
+    scored.sort(key=lambda s: abs(s["delta_mm3"]))
+    return scored[:n]
+
+
+# --- Hover flight time ---------------------------------------------------------
+#
+# TWR and the current constraint are evaluated at full throttle -- the right
+# regime for "how much thrust is available" and "will the ESC survive max
+# commanded current" -- but neither says how long the battery lasts, because
+# a hovering quad does not fly at full throttle: it flies at whatever
+# throttle makes thrust equal weight. That operating point has no closed
+# form here (thrust is a closed-form function of rpm, and rpm of volts, but
+# composing them and inverting for the volts that hits a target thrust is
+# not itself closed-form), so it is found by bisection on throttle fraction
+# instead -- thrust is monotonic in throttle, so bisection converges
+# reliably without needing a derivative.
+
+
+def hover_point(x, battery_mah=680.0, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
+                 chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
+                 cl_alpha=pa.CL_ALPHA, cd0=pa.CD0,
+                 induced_power_factor=pa.INDUCED_POWER_FACTOR, iters=40):
+    """Hover throttle, current draw, and estimated flight time for a design.
+
+    Not part of the optimizer's cost function -- this runs a bisection
+    search, so it is a plain (non-jitted, non-differentiable-through) Python
+    function meant for display, called once per UI update rather than once
+    per optimizer gradient step.
+
+    flight_time_min is battery_mah / (4 * hover current) with no reserve
+    margin -- i.e. "time to fully discharge at a constant hover load", not a
+    safe usable flight time. A real flight plan should keep a reserve (e.g.
+    stop at 80% discharge); this deliberately reports the unpadded number so
+    that choice stays visible rather than being silently baked in.
+    """
+    g = unpack(x)
+    unit = motor_prop_unit(g["kv"], g["stator_volume_mm3"], g["prop_diameter_m"],
+                            g["blade_count"], g["pitch_m"], chord_to_diameter_ratio,
+                            cl_alpha, cd0, induced_power_factor)
+    total_mass = other_mass_kg + 4.0 * (unit["motor_mass"] + unit["prop_mass"])
+    weight_n = total_mass * G
+    thrust_needed_per_motor = weight_n / 4.0
+
+    def thrust_at(frac):
+        volts = frac * vbat
+        rpm = mm.steady_state_rpm(
+            volts, vel, g["kv"], unit["resistance"], unit["i0"],
+            unit["prop_a_factor"], unit["prop_torque_factor"], unit["prop_max_rpm"],
+            unit["thrust_factor_x"], unit["thrust_factor_y"], unit["thrust_factor_z"])
+        return pa.bemt_thrust_torque(rpm, vel, g["prop_diameter_m"], g["pitch_m"],
+                                      g["blade_count"], chord_to_diameter_ratio,
+                                      cl_alpha, cd0, induced_power_factor)[0]
+
+    max_thrust = float(thrust_at(1.0))
+    feasible = max_thrust >= float(thrust_needed_per_motor)
+
+    lo, hi = 0.0, 1.0
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        if float(thrust_at(mid)) < float(thrust_needed_per_motor):
+            lo = mid
+        else:
+            hi = mid
+    hover_frac = hi if feasible else 1.0
+
+    hover = mm.equilibrium(
+        hover_frac * vbat, vel, g["kv"], unit["resistance"], unit["i0"],
+        PLACEHOLDER_MOTOR_RTH, unit["prop_a_factor"], unit["prop_torque_factor"],
+        unit["prop_max_rpm"], unit["thrust_factor_x"], unit["thrust_factor_y"],
+        unit["thrust_factor_z"])
+    total_current_a = 4.0 * float(hover["current_a"])
+    flight_time_min = ((battery_mah / 1000.0) / total_current_a * 60.0
+                        if total_current_a > 1e-9 else float("inf"))
+
+    return {
+        "feasible": feasible,
+        "hover_throttle_frac": float(hover_frac),
+        "hover_current_a_per_motor": float(hover["current_a"]),
+        "hover_current_a_total": total_current_a,
+        "battery_mah": float(battery_mah),
+        "flight_time_min": flight_time_min,
+    }
 
 
 # --- Cost: maximize TWR subject to current, spin-up, and size floors --------
