@@ -3,14 +3,24 @@
 motor_model.py evaluates a motor given (kV, R, I0, Rth, mass); this module is
 what lets the optimizer propose a stator size and kV and get realistic values
 for the rest, instead of being limited to the handful of motors SimITL ships.
-Everything here is a placeholder calibrated from as few datasheet points as
-it took to get the optimizer running end to end -- see each fit's docstring
-for exactly how thin the evidence is and what to fix first.
+Everything here is calibrated from vendor datasheet points in
+data/motor_datasheets.csv -- see each fit's docstring for how many points and
+distinct stator sizes back it, and what to fix first.
 """
+
+import csv
+from pathlib import Path
 
 import jax.numpy as jnp
 
 import multirotor.motor_model as mm
+
+DATA_DIR = Path(__file__).parent / "data"
+
+
+def _read_motor_datasheets():
+    with open(DATA_DIR / "motor_datasheets.csv", newline="") as f:
+        return list(csv.DictReader(f))
 
 
 def stator_volume_mm3(diameter_mm, height_mm):
@@ -26,32 +36,30 @@ def stator_volume_mm3(diameter_mm, height_mm):
 
 # --- Mass vs. stator volume --------------------------------------------------
 #
-# Calibrated from exactly two datasheet points: a 1002 (10mm x 2mm stator,
-# 200 mm^3) at 2.5 g, and a 1202.5 (12mm x 2.5mm, 360 mm^3) at 4.5 g. Two
-# points determine a line completely, so this is not evidence the
-# relationship is linear or that the intercept is meaningful -- it is just
-# enough to unblock the optimizer.
+# Calibrated from every datasheet row in data/motor_datasheets.csv that has a
+# mass (most rows do; R and I0 are frequently missing from vendor listings,
+# but weight almost always is published). As of this writing that is 19
+# points across 8 distinct stator sizes (0802, 1002, 1102, 1103, 1104,
+# 1202.5, 1203, 1204) -- a real improvement on the original two-point line
+# (1002 and 1202.5 only), though still a simple linear fit with no claim that
+# the relationship truly is linear across this whole size range.
 #
-# The intercept below comes out to ~0 g/mm^3, which is almost certainly
-# wrong: shaft, wires, and PCB are a fixed mass overhead that does not shrink
-# with stator volume, so a real fit (more points, spanning a wider size
-# range) should land on a positive intercept. With only two points forcing a
-# line through both, there is no way to tell a real intercept from
-# coincidence -- more data is what actually fixes this, not a manual nudge.
+# The intercept is a genuine least-squares fit now rather than forced through
+# two points, so unlike the original two-point version it is not
+# automatically ~0 -- see the module docstring history in git for that prior
+# caveat, which more data was expected to resolve.
+_MOTOR_ROWS = _read_motor_datasheets()
 _CAL_VOLUME_MM3 = jnp.array([
-    stator_volume_mm3(10.0, 2.0),   # 1002
-    stator_volume_mm3(12.0, 2.5),   # 1202.5
+    stator_volume_mm3(float(row["stator_diameter_mm"]), float(row["stator_height_mm"]))
+    for row in _MOTOR_ROWS if row["mass_g"]
 ])
-_CAL_MASS_G = jnp.array([2.5, 4.5])
+_CAL_MASS_G = jnp.array([float(row["mass_g"]) for row in _MOTOR_ROWS if row["mass_g"]])
 
-_MASS_SLOPE_G_PER_MM3 = (
-    (_CAL_MASS_G[1] - _CAL_MASS_G[0]) / (_CAL_VOLUME_MM3[1] - _CAL_VOLUME_MM3[0])
-)
-_MASS_INTERCEPT_G = _CAL_MASS_G[0] - _MASS_SLOPE_G_PER_MM3 * _CAL_VOLUME_MM3[0]
+_MASS_SLOPE_G_PER_MM3, _MASS_INTERCEPT_G = jnp.polyfit(_CAL_VOLUME_MM3, _CAL_MASS_G, 1)
 
 
 def motor_mass_kg(volume_mm3):
-    """Linear mass(volume) fit, in kg, from the two-point calibration above."""
+    """Linear mass(volume) fit, in kg, from the calibration data above."""
     grams = _MASS_SLOPE_G_PER_MM3 * volume_mm3 + _MASS_INTERCEPT_G
     return grams * 1e-3
 
@@ -66,38 +74,32 @@ def motor_mass_kg(volume_mm3):
 # still comes out physically consistent for whichever kV is chosen -- see
 # motor_resistance_ohm below.
 #
-# Calibrated from six datasheet points across two stator sizes: three
-# different windings each on a 1002 (10mm x 2mm, 200 mm^3) and a 1203 (12mm x
-# 3mm, 432 mm^3). Three windings per size is enough to see the premise hold
-# up -- Km really does stay roughly constant across kV at a fixed size, the
-# three 1002 values landing within about +-6% of their mean and the three
-# 1203 values within about +-5% of theirs. But two stator *sizes* is nowhere
-# near enough to trust the power-law exponent between them; that number is a
-# line through two points dressed up as a fit; the exponent
-# (KM_EXPONENT below, currently ~0.69) should be treated as a rough starting
-# guess. What to fix first: more sizes, not more windings per size -- the
-# within-size agreement is already about as good as it is going to get.
+# Calibrated from every datasheet row in data/motor_datasheets.csv that has
+# both a kV and a resistance -- as of this writing 12 points across 6 distinct
+# stator sizes (0802, 1002, 1103, 1104, 1203, 1204), up from the original 6
+# points across 2 sizes (1002, 1203 only). More sizes is exactly the gap the
+# original calibration comment called out as the priority fix, since two
+# sizes cannot distinguish a real power-law exponent from a line through two
+# points. Within-size agreement (Km roughly constant across kV at fixed
+# volume) should be re-checked whenever this list grows -- see
+# test_km_is_roughly_constant_within_a_stator_size.
 _CAL_KV_RPM_PER_V = jnp.array([
-    14000.0, 19000.0, 22000.0,   # 1002
-    6000.0, 8000.0, 11500.0,     # 1203
+    float(row["kv_rpm_per_v"]) for row in _MOTOR_ROWS if row["resistance_ohm"]
 ])
 _CAL_R_OHM = jnp.array([
-    0.175, 0.089, 0.075,   # 1002
-    0.320, 0.167, 0.100,   # 1203
+    float(row["resistance_ohm"]) for row in _MOTOR_ROWS if row["resistance_ohm"]
 ])
 _CAL_VOLUME_MM3_KM = jnp.array([
-    stator_volume_mm3(10.0, 2.0), stator_volume_mm3(10.0, 2.0),
-    stator_volume_mm3(10.0, 2.0),
-    stator_volume_mm3(12.0, 3.0), stator_volume_mm3(12.0, 3.0),
-    stator_volume_mm3(12.0, 3.0),
+    stator_volume_mm3(float(row["stator_diameter_mm"]), float(row["stator_height_mm"]))
+    for row in _MOTOR_ROWS if row["resistance_ohm"]
 ])
 
 _CAL_KT = mm.KT_NUMERATOR / _CAL_KV_RPM_PER_V
 _CAL_KM = _CAL_KT / jnp.sqrt(_CAL_R_OHM)
 
 # Power-law fit Km = c * volume^a, done as a linear regression in log-log
-# space. With only two distinct volumes in the calibration set this reduces
-# exactly to the line through the two per-size mean Km values.
+# space across all calibration rows above (not per-size means -- sizes with
+# more windings on record get proportionally more weight in the fit).
 _KM_EXPONENT, _KM_LOG_COEFFICIENT = jnp.polyfit(
     jnp.log(_CAL_VOLUME_MM3_KM), jnp.log(_CAL_KM), 1)
 _KM_COEFFICIENT = jnp.exp(_KM_LOG_COEFFICIENT)

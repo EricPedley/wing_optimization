@@ -3,14 +3,25 @@ motor_scaling.py.
 
 Same purpose as that module: let the optimizer propose a diameter and blade
 count and get a realistic mass and rotational inertia back, instead of being
-limited to SimITL's five catalogue propellers. The fits here are visibly
-noisier than the motor ones -- see mass_g_per_blade's docstring for why, and
-for a concrete case where the trend is not even monotonic.
+limited to SimITL's five catalogue propellers. Calibration data lives in
+data/prop_datasheets.csv. The fits here are visibly noisier than the motor
+ones -- see mass_g_per_blade's docstring for why, and for a concrete case
+where the trend is not even monotonic.
 """
+
+import csv
+from pathlib import Path
 
 import jax.numpy as jnp
 
+DATA_DIR = Path(__file__).parent / "data"
+
 MM_PER_INCH = 25.4
+
+
+def _read_prop_datasheets():
+    with open(DATA_DIR / "prop_datasheets.csv", newline="") as f:
+        return list(csv.DictReader(f))
 
 
 def diameter_mm(diameter_in):
@@ -41,15 +52,10 @@ def diameter_mm(diameter_in):
 # prediction from this fit as good to a factor of ~1.4, not as a precise
 # number -- fine for picking a rough design point, not for picking between
 # two similar-sized props.
-_CAL_DIAMETER_MM = jnp.array([
-    diameter_mm(3.0), diameter_mm(3.0),   # 3in, 2-blade / 3-blade
-    45.0, 45.0,                            # 45mm, 3-blade / 2-blade
-    diameter_mm(2.0),                      # 2in, 3-blade
-    diameter_mm(2.4),                      # 2.4in, 3-blade
-    65.0,                                   # 65mm, 2-blade
-])
-_CAL_BLADE_COUNT = jnp.array([2.0, 3.0, 3.0, 2.0, 3.0, 3.0, 2.0])
-_CAL_MASS_G = jnp.array([0.85, 1.3, 0.43, 0.33, 0.7, 0.63, 0.4])
+_PROP_ROWS = _read_prop_datasheets()
+_CAL_DIAMETER_MM = jnp.array([float(row["diameter_mm"]) for row in _PROP_ROWS])
+_CAL_BLADE_COUNT = jnp.array([float(row["blade_count"]) for row in _PROP_ROWS])
+_CAL_MASS_G = jnp.array([float(row["mass_g"]) for row in _PROP_ROWS])
 _CAL_MASS_PER_BLADE_G = _CAL_MASS_G / _CAL_BLADE_COUNT
 
 _MASS_EXPONENT, _MASS_LOG_COEFFICIENT = jnp.polyfit(

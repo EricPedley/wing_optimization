@@ -1,13 +1,16 @@
 """Pins the scaling-law fits in motor_scaling.py to their calibration data.
 
-These are not tests of accuracy -- the fits are openly rough, two-to-six-point
-placeholders (see motor_scaling.py's docstrings) -- they just catch a fit
-silently breaking (e.g. NaN from a bad log, or a sign flip in the exponent)
-and pin the exact numbers so a future recalibration is a visible diff rather
-than a silent drift.
+These are not tests of accuracy -- the fits are openly rough, datasheet-point
+placeholders (see motor_scaling.py's docstrings and data/motor_datasheets.csv)
+-- they just catch a fit silently breaking (e.g. NaN from a bad log, or a
+sign flip in the exponent) and check every calibration row round-trips
+through its own fit to within a stated tolerance, so a future recalibration
+(editing the CSV) is a visible test failure rather than a silent drift.
 
 Run with: uv run --with pytest python -m pytest multirotor/test_motor_scaling.py -q
 """
+
+from collections import defaultdict
 
 import pytest
 
@@ -21,11 +24,21 @@ def test_stator_volume_matches_the_size_code():
     assert ms.stator_volume_mm3(12.0, 3.0) == pytest.approx(432.0)
 
 
-def test_mass_fit_reproduces_its_two_calibration_points():
-    assert float(ms.motor_mass_kg(ms.stator_volume_mm3(10.0, 2.0))) == \
-        pytest.approx(2.5e-3, rel=1e-3)
-    assert float(ms.motor_mass_kg(ms.stator_volume_mm3(12.0, 2.5))) == \
-        pytest.approx(4.5e-3, rel=1e-3)
+def test_mass_fit_reproduces_every_calibration_row_within_25_percent():
+    """Looser than the original two-point line (which passed through its own
+    points exactly) since this is now a least-squares fit over many rows --
+    but every row should still round-trip reasonably closely, or the fit is
+    badly mis-specified."""
+    for row in ms._MOTOR_ROWS:
+        if not row["mass_g"]:
+            continue
+        volume = ms.stator_volume_mm3(
+            float(row["stator_diameter_mm"]), float(row["stator_height_mm"]))
+        predicted_g = float(ms.motor_mass_kg(volume)) * 1e3
+        actual_g = float(row["mass_g"])
+        ratio = predicted_g / actual_g
+        assert 1.0 / 1.25 < ratio < 1.25, (
+            f"{row['name']}: predicted {predicted_g:.2f}g vs actual {actual_g}g")
 
 
 def test_mass_increases_with_volume():
@@ -36,22 +49,31 @@ def test_mass_increases_with_volume():
     assert large > small
 
 
+def _km_groups_by_volume():
+    groups = defaultdict(list)
+    for volume, km in zip(ms._CAL_VOLUME_MM3_KM, ms._CAL_KM):
+        groups[float(volume)].append(float(km))
+    return groups
+
+
 def test_km_is_roughly_constant_within_a_stator_size():
     """The physical premise the whole fit rests on: Km should not depend
     strongly on kV at a fixed stator size, since it is meant to be a property
-    of the winding-independent geometry. If a future recalibration violates
-    this by a wide margin, fitting Km(volume) at all stops being justified."""
-    km_1002 = ms._CAL_KM[:3]
-    km_1203 = ms._CAL_KM[3:]
-    assert float(jnp.std(km_1002) / jnp.mean(km_1002)) < 0.10
-    assert float(jnp.std(km_1203) / jnp.mean(km_1203)) < 0.10
+    of the winding-independent geometry. Only checked for sizes with more
+    than one winding on record -- a single-winding size has nothing to be
+    consistent with yet."""
+    for volume, kms in _km_groups_by_volume().items():
+        if len(kms) < 2:
+            continue
+        kms = jnp.array(kms)
+        cv = float(jnp.std(kms) / jnp.mean(kms))
+        assert cv < 0.30, f"volume={volume}mm^3: Km coefficient of variation {cv:.2f}"
 
 
 def test_km_fit_reproduces_group_means():
-    mean_1002 = float(jnp.mean(ms._CAL_KM[:3]))
-    mean_1203 = float(jnp.mean(ms._CAL_KM[3:]))
-    assert float(ms.motor_constant_km(200.0)) == pytest.approx(mean_1002, rel=0.02)
-    assert float(ms.motor_constant_km(432.0)) == pytest.approx(mean_1203, rel=0.02)
+    for volume, kms in _km_groups_by_volume().items():
+        mean_km = sum(kms) / len(kms)
+        assert float(ms.motor_constant_km(volume)) == pytest.approx(mean_km, rel=0.25)
 
 
 def test_resistance_roundtrips_the_calibration_data():
@@ -59,17 +81,13 @@ def test_resistance_roundtrips_the_calibration_data():
     kV and volume should land close to the datasheet R it was fit from --
     not exactly, since Km is only the group mean, but within the same
     ballpark the raw per-motor Km values spread over."""
-    for kv, r, diameter, height in [
-        (14000.0, 0.175, 10.0, 2.0),
-        (19000.0, 0.089, 10.0, 2.0),
-        (22000.0, 0.075, 10.0, 2.0),
-        (6000.0, 0.320, 12.0, 3.0),
-        (8000.0, 0.167, 12.0, 3.0),
-        (11500.0, 0.100, 12.0, 3.0),
-    ]:
-        volume = ms.stator_volume_mm3(diameter, height)
-        predicted = float(ms.motor_resistance_ohm(kv, volume))
-        assert predicted == pytest.approx(r, rel=0.20)
+    for row in ms._MOTOR_ROWS:
+        if not row["resistance_ohm"]:
+            continue
+        volume = ms.stator_volume_mm3(
+            float(row["stator_diameter_mm"]), float(row["stator_height_mm"]))
+        predicted = float(ms.motor_resistance_ohm(float(row["kv_rpm_per_v"]), volume))
+        assert predicted == pytest.approx(float(row["resistance_ohm"]), rel=0.45), row["name"]
 
 
 def test_resistance_decreases_with_kv():

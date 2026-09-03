@@ -1,0 +1,20 @@
+name,vendor,stator_diameter_mm,stator_height_mm,kv_rpm_per_v,mass_g,resistance_ohm,i0_a,max_current_a,cells,source_url,notes
+GTS-V3 1002-14000,RCInPower,10.0,2.0,14000,2.5,0.175,0.8,9,1-2S,https://rotorriot.com/products/gts-v3-1002-14000kv-motor,original repo calibration point; I0 at 5V
+GTS-V3 1002-19000,RCInPower,10.0,2.0,19000,2.5,0.089,1.3,11.8,1S,,original repo calibration point; I0 at 5V; source via retailer listing
+GTS-V3 1002-22000,RCInPower,10.0,2.0,22000,2.5,0.075,1.5,14,1S,https://www.racedayquads.com/products/rcinpower-gts-v3-1002-22000kv-motor-choose-color,original repo calibration point; I0 at 5V
+GTS-V3 1203-6000,RCInPower,12.0,3.0,6000,4.5,0.320,,,2-3S,,original repo calibration point
+GTS-V3 1203-8000,RCInPower,12.0,3.0,8000,4.5,0.167,0.8,9.6,2-3S,https://pyrodrone.com/products/rcinpower-gts-v3-1203-8000kv-plus-2-3-inch-cinewhoop-micro-motor-choose-color,original repo calibration point; I0 at 10V; Plus variant
+GTS-V3 1203-11500,RCInPower,12.0,3.0,11500,4.5,0.100,,,2-3S,,original repo calibration point
+GTS-V3 0802-22000,RCInPower,8.0,2.0,22000,1.97,0.117,0.2,5.8,1S,https://pyrodrone.com/products/rcinpower-gts-v3-0802-22000kv-brushless-fpv-drone-motor-choose-color,new; I0 at 5V; max current on 3S basis
+M1103-8000,T-Motor,11.0,3.0,8000,4.6,0.163,0.58,11.5,2-4S,https://www.racedayquads.com/products/t-motor-m1103-8000kv-micro-motor,new; I0 at 3V
+M1103-11000,T-Motor,11.0,3.0,11000,4.6,0.163,0.58,11.5,2-4S,https://www.racedayquads.com/products/t-motor-m1103-11000kv-micro-motor,new; I0 at 3V; resistance shared with 8000kV listing
+EX1103-6000,Happymodel,11.0,3.0,6000,3.8,,0.12,,1-3S,https://www.happymodel.cn,new; I0 0.12A at 12080 RPM no-load; resistance not given; see throttle-sweep CSV for bench thrust data
+EX1103-8000,Happymodel,11.0,3.0,8000,3.8,,0.25,,1-3S,https://www.happymodel.cn,new; I0 0.25A at 15720 RPM no-load; resistance not given; see throttle-sweep CSV for bench thrust data
+EX1103-12000,Happymodel,11.0,3.0,12000,3.8,,0.44,,1-3S,https://www.happymodel.cn,new; I0 0.44A at 24750 RPM no-load; resistance not given; see throttle-sweep CSV for bench thrust data
+1104-4300,generic/DarwinFPV-class,11.0,4.0,4300,5.5,0.470,0.5,5.2,2-3S,https://darwinfpv.com/products/darwin-1104-4300kv-brushless-motor,new; lower-confidence generic listing; I0 at 12V
+F1204-5000,T-Motor,12.0,4.0,5000,6.1,0.240,0.7,6,2-3S,,new; max current is 60s rating
+GTS-1204-8000,RCInPower,12.0,4.0,8000,6.0,0.125,0.95,6,3-4S,https://pyrodrone.com/products/rcinpower-gts-1204-8000kv-motor-choose-color,new; I0 at 10V; max current on 3S basis (89W)
+EX1202.5-6400,Happymodel,12.0,2.5,6400,4.4,,,,1S-2S,https://www.amazon.com/HAPPYMODEL-EX1202-5-6400KV-8000KV-Motor/dp/B08WRQD5BB,mass-only; original repo calibration point (1202.5 @ 4.5g) is this motor family; no R/I0 published
+GTS-V2 1202.5-11500,RCInPower,12.0,2.5,11500,4.3,,,,1S,https://pyrodrone.com/products/rcinpower-gts-v2-1202-5-11500kv-motor-choose-color,mass-only; no R/I0 published
+GR1102-10000,GEPRC,11.0,2.0,10000,3.2,,,,1-3S,https://geprc.com/product/gr1102-motors/,mass-only; no R/I0 published
+Aeolus 1102-18000,HGLRC,11.0,2.0,18000,3.2,,,4.7,1S,https://pyrodrone.com/products/hglrc-aeolus-1102-18000kv-fpv-drone-motor,mass-only; no R/I0 published
