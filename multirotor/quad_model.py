@@ -631,7 +631,7 @@ def _prop_only_cost(prop_x, kv, resistance, i0, other_mass_kg, motor_mass, vel, 
                                 chord_to_diameter_ratio, cl_alpha, cd0,
                                 induced_power_factor)
 
-    total_mass = other_mass_kg + 4.0 * (motor_mass + prop_mass)
+    total_mass = other_mass_kg + fs.frame_mass_kg(diameter_m) + 4.0 * (motor_mass + prop_mass)
     weight_n = total_mass * G
 
     full_throttle = mm.equilibrium(
@@ -757,7 +757,8 @@ def _evaluate_motor_with_prop(c, prop_diameter_m, blade_count, pitch_m, vel, vba
                                 chord_to_diameter_ratio, cl_alpha, cd0,
                                 induced_power_factor)
 
-    total_mass = other_mass_kg + 4.0 * (motor_mass + prop_mass)
+    frame_mass = fs.frame_mass_kg(prop_diameter_m)
+    total_mass = other_mass_kg + frame_mass + 4.0 * (motor_mass + prop_mass)
     weight_n = total_mass * G
 
     full_throttle = mm.equilibrium(
@@ -775,7 +776,7 @@ def _evaluate_motor_with_prop(c, prop_diameter_m, blade_count, pitch_m, vel, vba
     tip_mach = tip_speed_m_s / SPEED_OF_SOUND_M_S
 
     return dict(
-        motor=c, motor_mass=motor_mass, prop_mass=prop_mass,
+        motor=c, motor_mass=motor_mass, prop_mass=prop_mass, frame_mass=frame_mass,
         prop_diameter_m=prop_diameter_m, blade_count=blade_count, pitch_m=pitch_m,
         total_mass=total_mass, weight_n=weight_n, twr=twr,
         spin_up_s=spin_up_s, tip_mach=tip_mach, **full_throttle)
@@ -834,7 +835,7 @@ def _best_catalogue_prop_for_motor(c, vel, vbat, other_mass_kg, chord_to_diamete
 
 
 def realized_design(x, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
-                     n_candidates=3, n_prop_candidates=30, max_iters=6,
+                     n_candidates=21, n_prop_candidates=30, max_iters=6,
                      chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
                      cl_alpha=pa.CL_ALPHA, cd0=pa.CD0,
                      induced_power_factor=pa.INDUCED_POWER_FACTOR,

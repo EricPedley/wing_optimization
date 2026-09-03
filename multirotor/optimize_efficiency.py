@@ -242,7 +242,8 @@ def _prop_only_efficiency_cost(prop_x, kv, resistance, i0, other_mass_kg, motor_
     battery_mass_kg = bm.mass_kg(battery_name)
     r_int = bm.r_int_ohm(battery_name)
 
-    total_mass = other_mass_kg + battery_mass_kg + 4.0 * (motor_mass + prop_mass)
+    total_mass = (other_mass_kg + qm.fs.frame_mass_kg(diameter_m) + battery_mass_kg
+                  + 4.0 * (motor_mass + prop_mass))
     weight_n = total_mass * qm.G
     thrust_needed_per_motor = weight_n / 4.0
 
@@ -339,7 +340,7 @@ def _result_efficiency_cost(result, min_twr=MIN_TWR, battery_name=BATTERY_NAME,
     return hover_current_total + total_penalty
 
 
-def realize_efficient_design(x, n_candidates=4, n_prop_candidates=30, max_iters=6,
+def realize_efficient_design(x, n_candidates=21, n_prop_candidates=30, max_iters=6,
                               min_twr=MIN_TWR, battery_name=BATTERY_NAME,
                               other_mass_kg=qm.OTHER_MASS_KG, use_catalogue_props=True):
     """realized_design, scored by this module's efficiency objective instead
