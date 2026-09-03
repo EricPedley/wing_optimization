@@ -18,3 +18,5 @@ EX1202.5-6400,Happymodel,12.0,2.5,6400,4.4,,,,1S-2S,https://www.amazon.com/HAPPY
 GTS-V2 1202.5-11500,RCInPower,12.0,2.5,11500,4.3,,,,1S,https://pyrodrone.com/products/rcinpower-gts-v2-1202-5-11500kv-motor-choose-color,mass-only; no R/I0 published
 GR1102-10000,GEPRC,11.0,2.0,10000,3.2,,,,1-3S,https://geprc.com/product/gr1102-motors/,mass-only; no R/I0 published
 Aeolus 1102-18000,HGLRC,11.0,2.0,18000,3.2,,,4.7,1S,https://pyrodrone.com/products/hglrc-aeolus-1102-18000kv-fpv-drone-motor,mass-only; no R/I0 published
+SPEEDX2 1202.5-10000,GEPRC,12.0,2.5,10000,4.53,,,11.3,1-2S,https://geprc.com/product/geprc-speedx2-1202-5-10000kv/,no R/I0 published; max current/power from datasheet header (84W); see speedx2_1202_5_throttle_sweep.csv for bench thrust data
+SPEEDX2 1202.5-15000,GEPRC,12.0,2.5,15000,4.53,,,17.3,1-2S,https://geprc.com/product/geprc-speedx2-1202-5-15000kv/,no R/I0 published; max current/power from datasheet header (128W); see speedx2_1202_5_throttle_sweep.csv for bench thrust data
