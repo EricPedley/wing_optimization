@@ -40,6 +40,7 @@ import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dcc, html, no_update
 from plotly.subplots import make_subplots
 
+import multirotor.battery_model as bm
 import multirotor.fastopt as fo
 import multirotor.quad_model as qm
 
@@ -74,8 +75,11 @@ ASSUMPTION_PARAMS = [
      "value": fo.ASSUMPTION_DEFAULTS["induced_power_factor"]},
 ]
 
-BATTERY_PARAM = {"id": "battery-mah", "name": "Battery capacity (mAh)",
-                  "min": 150, "max": 1500, "step": 10, "value": 680}
+BATTERY_PARAM = {"id": "battery-name", "name": "Battery",
+                  "options": [{"label": f"BetaFPV LAVA II 1S {n} "
+                                        f"({bm.mass_kg(n) * 1e3:.1f}g)", "value": n}
+                              for n in bm.BATTERIES],
+                  "value": "680mAh"}
 
 CONSTRAINT_OPTIONS = [
     {"label": "= (locked)", "value": "fixed"},
@@ -247,12 +251,12 @@ app.layout = html.Div(
             [
                 html.H3("Hover flight time"),
                 html.Div(
-                    dcc.Slider(
-                        id=BATTERY_PARAM["id"], min=BATTERY_PARAM["min"], max=BATTERY_PARAM["max"],
-                        step=BATTERY_PARAM["step"], value=BATTERY_PARAM["value"],
-                        tooltip={"placement": "bottom", "always_visible": False},
+                    dcc.RadioItems(
+                        id=BATTERY_PARAM["id"], options=BATTERY_PARAM["options"],
+                        value=BATTERY_PARAM["value"], inline=True,
+                        labelStyle={"marginRight": "16px"},
                     ),
-                    style={"maxWidth": "400px"},
+                    style={"maxWidth": "600px"},
                 ),
                 html.Div(id="hover-readout", style={"paddingTop": "8px", "fontFamily": "monospace"}),
             ],
@@ -476,12 +480,12 @@ def update_quantity_readouts(design):
     Input("design", "data"),
     Input(BATTERY_PARAM["id"], "value"),
 )
-def update_hover_readout(design, battery_mah):
+def update_hover_readout(design, battery_name):
     if not design:
         return no_update
     x = np.array([design["values"][k] for k in fo.DESIGN_VARS])
     a = design["assumptions"]
-    r = qm.hover_point(x, battery_mah=battery_mah, vbat=a["vbat"], other_mass_kg=a["other_mass_kg"],
+    r = qm.hover_point(x, battery_name=battery_name, other_mass_kg=a["other_mass_kg"],
                         cl_alpha=a["cl_alpha"], induced_power_factor=a["induced_power_factor"])
     if not r["feasible"]:
         return html.Div("Cannot hover — max thrust at full throttle is below the "
@@ -489,11 +493,12 @@ def update_hover_readout(design, battery_mah):
     return html.Div([
         html.Div(f"Hover throttle: {r['hover_throttle_frac'] * 100:.1f}%"),
         html.Div(f"Hover current (all 4 motors): {r['hover_current_a_total']:.2f} A"),
-        html.Div(f"Estimated hover flight time on {int(r['battery_mah'])} mAh: "
-                 f"{r['flight_time_min']:.1f} min",
+        html.Div(f"Estimated hover flight time on {int(r['battery_mah'])} mAh "
+                 f"({r['battery_name']}): {r['flight_time_min']:.1f} min",
                  style={"fontWeight": "bold"}),
-        html.Div("No reserve margin included -- this is time to fully discharge at a "
-                  "constant hover load, not a safe usable flight time.",
+        html.Div("No reserve margin included -- this is time to fully discharge (or hit "
+                  "a 3.0V voltage floor) at a constant hover load as the pack sags under "
+                  "load, not a safe usable flight time.",
                   style={"fontSize": "0.8em", "color": "#888"}),
     ])
 

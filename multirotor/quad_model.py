@@ -19,7 +19,10 @@ system's aggregate thrust, current, and spin-up time.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+from jaxopt import LBFGSB
 
+import multirotor.battery_model as bm
 import multirotor.frame_scaling as fs
 import multirotor.motor_model as mm
 import multirotor.motor_scaling as ms
@@ -315,73 +318,223 @@ def nearest_stator_sizes(volume_mm3, n=2):
 # not itself closed-form), so it is found by bisection on throttle fraction
 # instead -- thrust is monotonic in throttle, so bisection converges
 # reliably without needing a derivative.
+#
+# Pack voltage is not constant across a flight (see battery_model.py): it
+# sags with both load and state of charge, and vbat itself is one of the
+# equilibrium's inputs, so the hover throttle/current found above is only
+# the *initial* operating point. As the pack discharges, its terminal
+# voltage under the same hover load keeps falling, which means the throttle
+# fraction needed to still produce hover thrust keeps rising (and current
+# with it) -- a hovering quad draws more current near the end of a battery
+# than at the start, not the same current the whole way, so
+# battery_mah / (4 * initial current) overestimates flight time. This is
+# handled by simulating the discharge in fixed time steps: at each step,
+# re-run the same bisection at the pack's *current* terminal voltage (a
+# function of mAh already drawn and the present current, via
+# battery_model.terminal_voltage) to find the new hover throttle/current,
+# then advance mAh drawn by current * dt. Stops at whichever of "rated
+# capacity fully drawn" or "pack voltage sagged to a 3.0V floor" comes
+# first -- LiPo terminal voltage falls off a cliff past that point (see the
+# OCV curve's own tail), and a real ESC/flight controller would call this
+# "empty" well before the model's voltage term goes non-physical.
+
+DISCHARGE_VOLTAGE_FLOOR_V = 3.0
+DISCHARGE_DT_S = 2.0
+DISCHARGE_N_STEPS = 1800  # DISCHARGE_DT_S * DISCHARGE_N_STEPS = 3600s cap
+_HOVER_NEWTON_ITERS = 8
 
 
-def hover_point(x, battery_mah=680.0, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
-                 chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
-                 cl_alpha=pa.CL_ALPHA, cd0=pa.CD0,
-                 induced_power_factor=pa.INDUCED_POWER_FACTOR, iters=40):
-    """Hover throttle, current draw, and estimated flight time for a design.
+def _hover_throttle_frac(vbat_now, thrust_needed_per_motor, vel, kv, resistance, i0,
+                          prop_a_factor, prop_torque_factor, prop_max_rpm,
+                          thrust_factor_x, thrust_factor_y, thrust_factor_z,
+                          diameter_m, pitch_m, blade_count, chord_to_diameter_ratio,
+                          cl_alpha, cd0, induced_power_factor):
+    """Throttle fraction (of vbat_now) at which one motor/prop's thrust
+    equals thrust_needed_per_motor, by Newton's method on
+    f(frac) = thrust(frac * vbat_now) - thrust_needed_per_motor.
 
-    Not part of the optimizer's cost function -- this runs a bisection
-    search, so it is a plain (non-jitted, non-differentiable-through) Python
-    function meant for display, called once per UI update rather than once
-    per optimizer gradient step.
+    thrust(volts) is a closed-form composition of two quadratic solves
+    (steady_state_rpm, then bemt_thrust_torque) -- smooth and, on the
+    feasible branch, monotonically increasing in volts -- so jax.grad gives
+    an exact derivative and a handful of Newton steps converges far faster
+    than bisection while staying inside one jit/scan trace instead of
+    escaping to Python floats every iteration.
 
-    flight_time_min is battery_mah / (4 * hover current) with no reserve
-    margin -- i.e. "time to fully discharge at a constant hover load", not a
-    safe usable flight time. A real flight plan should keep a reserve (e.g.
-    stop at 80% discharge); this deliberately reports the unpadded number so
-    that choice stays visible rather than being silently baked in.
+    Clamped to [0, 1] every step: thrust is only monotonic increasing near
+    its equilibrium branch, and volts=0 or the propeller's max-rpm regime can
+    otherwise send Newton's step outside the physically meaningful throttle
+    range.
     """
-    g = unpack(x)
-    unit = motor_prop_unit(g["kv"], g["stator_volume_mm3"], g["prop_diameter_m"],
-                            g["blade_count"], g["pitch_m"], chord_to_diameter_ratio,
-                            cl_alpha, cd0, induced_power_factor)
-    frame_mass = fs.frame_mass_kg(g["prop_diameter_m"])
-    total_mass = (other_mass_kg + frame_mass
+    def thrust_at(volts):
+        rpm = mm.steady_state_rpm(
+            volts, vel, kv, resistance, i0, prop_a_factor, prop_torque_factor,
+            prop_max_rpm, thrust_factor_x, thrust_factor_y, thrust_factor_z)
+        return pa.bemt_thrust_torque(rpm, vel, diameter_m, pitch_m, blade_count,
+                                      chord_to_diameter_ratio, cl_alpha, cd0,
+                                      induced_power_factor)[0]
+
+    def f(frac):
+        return thrust_at(frac * vbat_now) - thrust_needed_per_motor
+
+    df = jax.grad(f)
+
+    def newton_step(frac, _):
+        slope = jnp.maximum(df(frac), 1e-9)
+        frac = jnp.clip(frac - f(frac) / slope, 0.0, 1.0)
+        return frac, None
+
+    frac0 = jnp.array(0.5)
+    frac, _ = jax.lax.scan(newton_step, frac0, None, length=_HOVER_NEWTON_ITERS)
+    return frac
+
+
+def _hover_point_jit(vel, other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
+                      induced_power_factor, kv, stator_volume_mm3, prop_diameter_m,
+                      blade_count, pitch_m, battery_mass_kg, capacity_mah, r_int_ohm):
+    unit = motor_prop_unit(kv, stator_volume_mm3, prop_diameter_m, blade_count, pitch_m,
+                            chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor)
+    frame_mass = fs.frame_mass_kg(prop_diameter_m)
+    total_mass = (other_mass_kg + frame_mass + battery_mass_kg
                   + 4.0 * (unit["motor_mass"] + unit["prop_mass"]))
     weight_n = total_mass * G
     thrust_needed_per_motor = weight_n / 4.0
 
-    def thrust_at(frac):
-        volts = frac * vbat
-        rpm = mm.steady_state_rpm(
-            volts, vel, g["kv"], unit["resistance"], unit["i0"],
+    def solve_frac(vbat_now):
+        return _hover_throttle_frac(
+            vbat_now, thrust_needed_per_motor, vel, kv, unit["resistance"], unit["i0"],
             unit["prop_a_factor"], unit["prop_torque_factor"], unit["prop_max_rpm"],
-            unit["thrust_factor_x"], unit["thrust_factor_y"], unit["thrust_factor_z"])
-        return pa.bemt_thrust_torque(rpm, vel, g["prop_diameter_m"], g["pitch_m"],
-                                      g["blade_count"], chord_to_diameter_ratio,
-                                      cl_alpha, cd0, induced_power_factor)[0]
+            unit["thrust_factor_x"], unit["thrust_factor_y"], unit["thrust_factor_z"],
+            prop_diameter_m, pitch_m, blade_count, chord_to_diameter_ratio, cl_alpha,
+            cd0, induced_power_factor)
 
-    max_thrust = float(thrust_at(1.0))
-    feasible = max_thrust >= float(thrust_needed_per_motor)
+    def current_at(vbat_now, frac):
+        hover = mm.equilibrium(
+            frac * vbat_now, vel, kv, unit["resistance"], unit["i0"],
+            PLACEHOLDER_MOTOR_RTH, unit["prop_a_factor"], unit["prop_torque_factor"],
+            unit["prop_max_rpm"], unit["thrust_factor_x"], unit["thrust_factor_y"],
+            unit["thrust_factor_z"])
+        return 4.0 * hover["current_a"]
 
-    lo, hi = 0.0, 1.0
-    for _ in range(iters):
-        mid = 0.5 * (lo + hi)
-        if float(thrust_at(mid)) < float(thrust_needed_per_motor):
-            lo = mid
-        else:
-            hi = mid
-    hover_frac = hi if feasible else 1.0
+    vbat0 = bm.terminal_voltage(0.0, 0.0, r_int_ohm)  # OCV at full charge
+    max_thrust0 = pa.bemt_thrust_torque(
+        mm.steady_state_rpm(vbat0, vel, kv, unit["resistance"], unit["i0"],
+                             unit["prop_a_factor"], unit["prop_torque_factor"],
+                             unit["prop_max_rpm"], unit["thrust_factor_x"],
+                             unit["thrust_factor_y"], unit["thrust_factor_z"]),
+        vel, prop_diameter_m, pitch_m, blade_count, chord_to_diameter_ratio,
+        cl_alpha, cd0, induced_power_factor)[0]
+    feasible0 = max_thrust0 >= thrust_needed_per_motor
 
-    hover = mm.equilibrium(
-        hover_frac * vbat, vel, g["kv"], unit["resistance"], unit["i0"],
-        PLACEHOLDER_MOTOR_RTH, unit["prop_a_factor"], unit["prop_torque_factor"],
-        unit["prop_max_rpm"], unit["thrust_factor_x"], unit["thrust_factor_y"],
-        unit["thrust_factor_z"])
-    total_current_a = 4.0 * float(hover["current_a"])
-    flight_time_min = ((battery_mah / 1000.0) / total_current_a * 60.0
-                        if total_current_a > 1e-9 else float("inf"))
+    hover_frac0 = solve_frac(vbat0)
+    current0 = current_at(vbat0, hover_frac0)
+
+    def step(carry, _):
+        mah_drawn, t_s, current, still_flying = carry
+        soc_frac = mah_drawn / capacity_mah
+        vbat_now = bm.terminal_voltage(soc_frac, current, r_int_ohm)
+
+        rpm_max = mm.steady_state_rpm(vbat_now, vel, kv, unit["resistance"], unit["i0"],
+                                       unit["prop_a_factor"], unit["prop_torque_factor"],
+                                       unit["prop_max_rpm"], unit["thrust_factor_x"],
+                                       unit["thrust_factor_y"], unit["thrust_factor_z"])
+        max_thrust_now = pa.bemt_thrust_torque(
+            rpm_max, vel, prop_diameter_m, pitch_m, blade_count,
+            chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor)[0]
+
+        can_continue = (still_flying
+                         & (vbat_now > DISCHARGE_VOLTAGE_FLOOR_V)
+                         & (mah_drawn < capacity_mah)
+                         & (max_thrust_now >= thrust_needed_per_motor))
+
+        frac_now = solve_frac(vbat_now)
+        current_now = current_at(vbat_now, frac_now)
+
+        new_current = jnp.where(can_continue, current_now, current)
+        new_mah = mah_drawn + jnp.where(can_continue,
+                                         new_current * (DISCHARGE_DT_S / 3600.0) * 1000.0,
+                                         0.0)
+        new_t_s = t_s + jnp.where(can_continue, DISCHARGE_DT_S, 0.0)
+        return (new_mah, new_t_s, new_current, can_continue), None
+
+    init = (jnp.array(0.0), jnp.array(0.0), current0, feasible0)
+    (_, t_s_final, _, _), _ = jax.lax.scan(step, init, None, length=DISCHARGE_N_STEPS)
+
+    return dict(feasible=feasible0, hover_frac0=hover_frac0, current0=current0,
+                flight_time_s=t_s_final)
+
+
+_hover_point_jitted = jax.jit(_hover_point_jit, static_argnums=())
+
+
+def hover_point(x, battery_name="680mAh", vel=0.0, other_mass_kg=OTHER_MASS_KG,
+                 chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
+                 cl_alpha=pa.CL_ALPHA, cd0=pa.CD0,
+                 induced_power_factor=pa.INDUCED_POWER_FACTOR):
+    """Hover throttle/current at the start of a flight, plus estimated flight
+    time from simulating the pack's discharge under constant hover thrust.
+
+    Everything -- the per-timestep hover-throttle solve (Newton's method
+    inside _hover_throttle_frac, exact-gradient rather than bisection since
+    thrust(volts) is smooth and closed-form) and the discharge time-stepping
+    itself -- runs inside one jax.jit'd lax.scan (_hover_point_jit), the same
+    style as _solve_prop_for_motor's vmapped LBFGSB above: no Python-level
+    loop dispatches an untraced JAX op per iteration, so a several-hundred-
+    step discharge simulation stays fast enough for a UI callback.
+
+    battery_name selects one of battery_model.BATTERIES (480mAh/580mAh/
+    680mAh BetaFPV LAVA II 1S HV-LiPo) for capacity, mass, and internal
+    resistance; vbat is no longer a free parameter here since the whole
+    point of this function is to model how it sags, but the pack's own mass
+    is folded into total_mass (a heavier or lighter battery changes hover
+    thrust needed per motor, which is exactly the effect this function
+    should reflect).
+
+    The discharge loop is a fixed-length scan (DISCHARGE_N_STEPS steps of
+    DISCHARGE_DT_S each) with a "still_flying" mask that freezes state once
+    the pack empties, sags past DISCHARGE_VOLTAGE_FLOOR_V, or can no longer
+    produce hover thrust even at full throttle -- so flight_time_s is exact
+    to within one timestep regardless of when within the fixed length that
+    happens, at the cost of always running the full step count. Raise
+    DISCHARGE_N_STEPS if a design's flight time can exceed
+    DISCHARGE_DT_S * DISCHARGE_N_STEPS (3600s / 60min by default).
+
+    flight_time_min has no reserve margin -- i.e. "time to fully discharge
+    (or hit the voltage floor) at a constant hover load", not a safe usable
+    flight time. A real flight plan should keep a reserve (e.g. stop at 80%
+    discharge); this deliberately reports the unpadded number so that choice
+    stays visible rather than being silently baked in.
+    """
+    g = unpack(x)
+    capacity_mah = bm.capacity_mah(battery_name)
+    battery_mass_kg = bm.mass_kg(battery_name)
+    r_int = bm.r_int_ohm(battery_name)
+
+    r = _hover_point_jitted(
+        vel, other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
+        induced_power_factor, g["kv"], g["stator_volume_mm3"], g["prop_diameter_m"],
+        g["blade_count"], g["pitch_m"], battery_mass_kg, capacity_mah, r_int)
+
+    feasible = bool(r["feasible"])
+    current0 = float(r["current0"])
+    if not feasible:
+        return {
+            "feasible": False,
+            "hover_throttle_frac": float(r["hover_frac0"]),
+            "hover_current_a_per_motor": current0 / 4.0,
+            "hover_current_a_total": current0,
+            "battery_name": battery_name,
+            "battery_mah": capacity_mah,
+            "flight_time_min": 0.0,
+        }
 
     return {
-        "feasible": feasible,
-        "hover_throttle_frac": float(hover_frac),
-        "hover_current_a_per_motor": float(hover["current_a"]),
-        "hover_current_a_total": total_current_a,
-        "battery_mah": float(battery_mah),
-        "flight_time_min": flight_time_min,
+        "feasible": True,
+        "hover_throttle_frac": float(r["hover_frac0"]),
+        "hover_current_a_per_motor": current0 / 4.0,
+        "hover_current_a_total": current0,
+        "battery_name": battery_name,
+        "battery_mah": capacity_mah,
+        "flight_time_min": float(r["flight_time_s"]) / 60.0,
     }
 
 
@@ -428,7 +581,7 @@ def cost(x, vel=0.0):
     return -r["twr"] + total_penalty
 
 
-# --- Realized design: snap to an actually-buyable motor ----------------------
+# --- Realized design: snap to an actually-buyable motor, then re-fit the prop
 #
 # The optimizer searches kV and stator_volume_mm3 as continuous variables and
 # motor_scaling.py's fits stand in for "what would a motor here be like" --
@@ -440,73 +593,233 @@ def cost(x, vel=0.0):
 # of the fitted estimates -- i.e. the number you'd actually get, not the
 # number the continuous search believes.
 #
-# Propeller sizing is left as the fitted/BEMT estimate (diameter, pitch, and
-# blade count are continued to be treated as freely choosable -- a much wider
-# aftermarket exists for props than for motors, and matching a specific
-# catalogue prop is a separate, harder problem noted in prop_scaling.py).
+# Picking a motor purely by (kV, volume) distance to the *original*
+# continuous optimum is not quite right, though: that optimum was found
+# jointly with a particular prop, and a real motor's kV rarely matches the
+# continuous kV exactly, which shifts what prop is actually best for it (a
+# lower-kV motor wants a different pitch/diameter tradeoff to reach the same
+# rpm-limited operating point, changing its torque load, which is what a
+# motor is actually matched to -- not the raw kV/volume numbers in isolation).
+# So this is genuinely a coupled fixed-point problem, not a one-shot lookup:
+# fix a motor, find its best prop; that motor+prop's performance is what
+# should decide which candidate motor is "best," not proximity alone; and in
+# principle a different prop implies a different ideal motor, which could
+# flip which real motor is closest. realized_design iterates: propose the
+# n_candidates nearest motors by (kV, volume) distance to the current design
+# point, optimize the prop for each, keep whichever motor+prop combination
+# has the best TWR as the new design point, and repeat until the chosen
+# motor stops changing (each round's winning motor+its optimized prop become
+# next round's query point for a fresh nearest-candidates lookup -- since the
+# winner's own real kV/volume are now exactly on the grid, that lookup
+# reliably includes it again as a candidate, so the loop can only change
+# course if a *different* candidate, evaluated with ITS optimal prop, now
+# wins).
+
+
+def _prop_only_cost(prop_x, kv, resistance, i0, other_mass_kg, motor_mass, vel, vbat,
+                     chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor):
+    """cost(), specialized to a fixed motor (kV/R/I0/mass) with only the three
+    propeller variables (diameter, blade_count, pitch) free. Same penalty
+    shape as cost() -- see its docstring -- just without the stator-volume
+    floor penalty, since volume is not a free variable once a real motor is
+    chosen."""
+    diameter_m, blade_count, pitch_m = prop_x
+    diameter_mm_ = diameter_m * 1e3
+    prop_mass = ps.prop_mass_kg(diameter_mm_, blade_count)
+    prop_inertia = ps.prop_inertia_kg_m2(prop_mass, diameter_mm_)
+    aero = pa.to_simitl_params(diameter_m, pitch_m, blade_count,
+                                chord_to_diameter_ratio, cl_alpha, cd0,
+                                induced_power_factor)
+
+    total_mass = other_mass_kg + 4.0 * (motor_mass + prop_mass)
+    weight_n = total_mass * G
+
+    full_throttle = mm.equilibrium(
+        vbat, vel, kv, resistance, i0, PLACEHOLDER_MOTOR_RTH,
+        aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
+        aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
+    twr = 4.0 * full_throttle["thrust_n"] / jnp.maximum(weight_n, 1e-9)
+
+    spin_up_s = mm.spin_up_time_s(
+        SPIN_UP_START_FRAC * vbat, SPIN_UP_END_FRAC * vbat, vel, kv, resistance, i0,
+        aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
+        aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"],
+        prop_inertia)
+
+    tip_speed_m_s = jnp.pi * diameter_m * full_throttle["rpm"] / 60.0
+    tip_mach = tip_speed_m_s / SPEED_OF_SOUND_M_S
+
+    def penalty(shortfall, scale):
+        return jnp.maximum(-shortfall / scale, 0.0) ** 2
+
+    total_penalty = PENALTY_WEIGHT * (
+        penalty(ESC_MAX_CURRENT_A - full_throttle["current_a"], CURRENT_SCALE_A)
+        + penalty(SPIN_UP_BUDGET_S - spin_up_s, SPINUP_SCALE_S)
+        + penalty(MAX_TIP_MACH - tip_mach, TIP_MACH_SCALE)
+    )
+    return -twr + total_penalty
+
+
+_PROP_BOUNDS_LOWER = jnp.array([0.04, 2.0, 0.015])
+_PROP_BOUNDS_UPPER = jnp.array([0.09, 4.0, 0.08])
+_PROP_N_STARTS = 24
+_PROP_POLISH_ITERS = 60
+
+
+@jax.jit
+def _solve_prop_for_motor(starts, kv, resistance, i0, motor_mass, vel, vbat, other_mass_kg,
+                           chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor):
+    """vmapped LBFGSB over `starts`, jitted as one unit -- same shape as
+    optimize.py's _solve, so the per-candidate/per-round multi-start search
+    this is called from (potentially dozens of times across
+    realized_design's iterations x n_candidates) stays fast: everything
+    inside is traced once and reused, instead of re-tracing a fresh LBFGSB
+    call from Python for every start.
+    """
+    def fun(prop_x):
+        return _prop_only_cost(prop_x, kv, resistance, i0, other_mass_kg, motor_mass,
+                                vel, vbat, chord_to_diameter_ratio, cl_alpha, cd0,
+                                induced_power_factor)
+
+    def polish(x0):
+        res = LBFGSB(fun=fun, maxiter=_PROP_POLISH_ITERS).run(
+            x0, bounds=(_PROP_BOUNDS_LOWER, _PROP_BOUNDS_UPPER))
+        x = jnp.clip(res.params, _PROP_BOUNDS_LOWER, _PROP_BOUNDS_UPPER)
+        return x, fun(x)
+
+    xs, costs = jax.vmap(polish)(starts)
+    costs = jnp.where(jnp.isfinite(costs), costs, jnp.inf)
+    best = jnp.argmin(costs)
+    return xs[best], costs[best]
+
+
+def _optimize_prop_for_motor(kv, resistance, i0, motor_mass, vel, vbat, other_mass_kg,
+                              chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor,
+                              prop_x0):
+    """Best (diameter, blade_count, pitch) for a fixed, fully-specified real
+    motor. A handful of LBFGSB starts scattered plus the caller's previous
+    prop as a seed -- this is a 3-variable, well-behaved sub-problem (the
+    hard multi-modal search is what optimize.py's Adam/multi-start already
+    solved to find a motor neighborhood; this only needs to locally refine
+    the prop for one fixed motor), so it does not need Adam's global search.
+    """
+    rng = np.random.default_rng(0)
+    lo, hi = np.asarray(_PROP_BOUNDS_LOWER), np.asarray(_PROP_BOUNDS_UPPER)
+    scatter = rng.random((_PROP_N_STARTS - 1, 3)) * (hi - lo) + lo
+    starts = jnp.asarray(np.vstack([np.clip(np.asarray(prop_x0), lo, hi), scatter]))
+
+    best_x, best_cost = _solve_prop_for_motor(
+        starts, kv, resistance, i0, motor_mass, vel, vbat, other_mass_kg,
+        chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor)
+    return best_x, best_cost
+
+
+def _evaluate_motor_with_prop(c, prop_diameter_m, blade_count, pitch_m, vel, vbat,
+                               other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
+                               induced_power_factor):
+    """Full evaluate()-shaped result for one catalogue motor candidate `c`
+    (see motor_scaling.nearest_catalogue_motor) paired with a specific prop.
+    """
+    motor_mass = c["mass_g"] * 1e-3
+    resistance = c["resistance_ohm"]
+    i0 = c["i0_a"] if c["i0_a"] is not None else no_load_current_a(c["kv_rpm_per_v"])
+
+    diameter_mm_ = prop_diameter_m * 1e3
+    prop_mass = ps.prop_mass_kg(diameter_mm_, blade_count)
+    prop_inertia = ps.prop_inertia_kg_m2(prop_mass, diameter_mm_)
+    aero = pa.to_simitl_params(prop_diameter_m, pitch_m, blade_count,
+                                chord_to_diameter_ratio, cl_alpha, cd0,
+                                induced_power_factor)
+
+    total_mass = other_mass_kg + 4.0 * (motor_mass + prop_mass)
+    weight_n = total_mass * G
+
+    full_throttle = mm.equilibrium(
+        vbat, vel, c["kv_rpm_per_v"], resistance, i0, PLACEHOLDER_MOTOR_RTH,
+        aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
+        aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
+
+    twr = 4.0 * full_throttle["thrust_n"] / jnp.maximum(weight_n, 1e-9)
+    spin_up_s = mm.spin_up_time_s(
+        SPIN_UP_START_FRAC * vbat, SPIN_UP_END_FRAC * vbat, vel,
+        c["kv_rpm_per_v"], resistance, i0, aero["prop_a_factor"],
+        aero["prop_torque_factor"], aero["prop_max_rpm"], aero["thrust_factor_x"],
+        aero["thrust_factor_y"], aero["thrust_factor_z"], prop_inertia)
+    tip_speed_m_s = jnp.pi * prop_diameter_m * full_throttle["rpm"] / 60.0
+    tip_mach = tip_speed_m_s / SPEED_OF_SOUND_M_S
+
+    return dict(
+        motor=c, motor_mass=motor_mass, prop_mass=prop_mass,
+        prop_diameter_m=prop_diameter_m, blade_count=blade_count, pitch_m=pitch_m,
+        total_mass=total_mass, weight_n=weight_n, twr=twr,
+        spin_up_s=spin_up_s, tip_mach=tip_mach, **full_throttle)
 
 
 def realized_design(x, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
-                     n_candidates=3, chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
+                     n_candidates=3, max_iters=6,
+                     chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
                      cl_alpha=pa.CL_ALPHA, cd0=pa.CD0,
                      induced_power_factor=pa.INDUCED_POWER_FACTOR):
-    """Re-evaluate a design point's whole-quad performance using the nearest
-    real, buyable motor's actual datasheet specs in place of the fitted ones.
+    """Re-evaluate a design point's whole-quad performance using a real,
+    buyable motor's actual datasheet specs, with the propeller re-optimized
+    for that specific motor -- iterated to a fixed point, since picking a
+    motor and picking a prop are coupled (see the module comment above).
 
-    Returns a dict with "candidates" (the n_candidates nearest catalogue
-    motors, nearest first, from motor_scaling.nearest_catalogue_motor) and
-    "best", the full evaluate()-shaped result for the nearest candidate that
-    has a complete datasheet (mass, resistance, and I0 all present) -- a
-    motor missing any of those can't be simulated, so it is skipped in favor
-    of the next-nearest fully specified one. best is None if no candidate
-    among the n_candidates nearest is fully specified; widen n_candidates in
-    that case.
+    Each round: propose the n_candidates nearest catalogue motors to the
+    current design point (motor_scaling.nearest_catalogue_motor), skip any
+    missing mass/resistance (can't be simulated), optimize the propeller for
+    each fully-specified candidate, and keep the motor+prop combination with
+    the best TWR. That winner becomes next round's design point. Stops when
+    the chosen motor is the same real part two rounds in a row, or after
+    max_iters rounds if it keeps oscillating between two similarly-good
+    motors (rare, but with only ~20 catalogue motors and no strict
+    monotonicity proof across the swap, worth capping rather than assuming).
 
-    I0 falls back to no_load_current_a(kv) (the same unfit placeholder
-    evaluate() uses) when a real datasheet doesn't publish it, since I0's
-    effect on the physics is secondary (see no_load_current_a's docstring)
-    and most vendor listings that give R also give at least an idle current.
+    Returns a dict with "best" (the winning round's evaluate()-shaped result,
+    plus "motor", "prop_diameter_m", "blade_count", "pitch_m"; None if no
+    round ever found a fully-specified candidate), "converged" (True if the
+    motor choice stabilized before max_iters), and "iterations" (rounds run).
     """
     g = unpack(x)
-    candidates = ms.nearest_catalogue_motor(
-        g["kv"], g["stator_volume_mm3"], n=n_candidates)
+    kv, volume = g["kv"], g["stator_volume_mm3"]
+    prop_x0 = jnp.array([g["prop_diameter_m"], g["blade_count"], g["pitch_m"]])
 
     best = None
-    for c in candidates:
-        if c["mass_g"] is None or c["resistance_ohm"] is None:
-            continue
-        motor_mass = c["mass_g"] * 1e-3
-        resistance = c["resistance_ohm"]
-        i0 = c["i0_a"] if c["i0_a"] is not None else no_load_current_a(g["kv"])
+    prev_motor_name = None
+    converged = False
+    iterations = 0
 
-        diameter_mm_ = g["prop_diameter_m"] * 1e3
-        prop_mass = ps.prop_mass_kg(diameter_mm_, g["blade_count"])
-        prop_inertia = ps.prop_inertia_kg_m2(prop_mass, diameter_mm_)
-        aero = pa.to_simitl_params(g["prop_diameter_m"], g["pitch_m"], g["blade_count"],
-                                    chord_to_diameter_ratio, cl_alpha, cd0,
-                                    induced_power_factor)
+    for iterations in range(1, max_iters + 1):
+        candidates = ms.nearest_catalogue_motor(kv, volume, n=n_candidates)
+        round_best = None
+        round_best_cost = jnp.inf
 
-        total_mass = other_mass_kg + 4.0 * (motor_mass + prop_mass)
-        weight_n = total_mass * G
+        for c in candidates:
+            if c["mass_g"] is None or c["resistance_ohm"] is None:
+                continue
+            i0 = c["i0_a"] if c["i0_a"] is not None else no_load_current_a(c["kv_rpm_per_v"])
+            prop_x, prop_cost = _optimize_prop_for_motor(
+                c["kv_rpm_per_v"], c["resistance_ohm"], i0, c["mass_g"] * 1e-3,
+                vel, vbat, other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
+                induced_power_factor, prop_x0)
+            if prop_cost < round_best_cost:
+                diameter_m, blade_count, pitch_m = (float(v) for v in prop_x)
+                round_best_cost = prop_cost
+                round_best = _evaluate_motor_with_prop(
+                    c, diameter_m, blade_count, pitch_m, vel, vbat, other_mass_kg,
+                    chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor)
 
-        full_throttle = mm.equilibrium(
-            vbat, vel, c["kv_rpm_per_v"], resistance, i0, PLACEHOLDER_MOTOR_RTH,
-            aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
-            aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
+        if round_best is None:
+            break
 
-        twr = 4.0 * full_throttle["thrust_n"] / jnp.maximum(weight_n, 1e-9)
-        spin_up_s = mm.spin_up_time_s(
-            SPIN_UP_START_FRAC * vbat, SPIN_UP_END_FRAC * vbat, vel,
-            c["kv_rpm_per_v"], resistance, i0, aero["prop_a_factor"],
-            aero["prop_torque_factor"], aero["prop_max_rpm"], aero["thrust_factor_x"],
-            aero["thrust_factor_y"], aero["thrust_factor_z"], prop_inertia)
-        tip_speed_m_s = jnp.pi * g["prop_diameter_m"] * full_throttle["rpm"] / 60.0
-        tip_mach = tip_speed_m_s / SPEED_OF_SOUND_M_S
+        best = round_best
+        if best["motor"]["name"] == prev_motor_name:
+            converged = True
+            break
+        prev_motor_name = best["motor"]["name"]
 
-        best = dict(
-            motor=c, motor_mass=motor_mass, prop_mass=prop_mass,
-            total_mass=total_mass, weight_n=weight_n, twr=twr,
-            spin_up_s=spin_up_s, tip_mach=tip_mach, **full_throttle)
-        break
+        kv = best["motor"]["kv_rpm_per_v"]
+        volume = best["motor"]["volume_mm3"]
+        prop_x0 = jnp.array([best["prop_diameter_m"], best["blade_count"], best["pitch_m"]])
 
-    return {"candidates": candidates, "best": best}
+    return {"best": best, "converged": converged, "iterations": iterations}
