@@ -22,17 +22,6 @@ def test_standoff_volume_matches_cylinder_formula():
     expected = jnp.pi * radius_m ** 2 * fs.STANDOFF_HEIGHT_M
     assert float(fs.standoff_volume_m3()) == pytest.approx(float(expected))
 
-
-def test_arm_length_is_floored_at_zero_for_small_props():
-    assert float(fs.arm_length_m(0.02)) == 0.0
-
-
-def test_arm_length_grows_for_props_bigger_than_the_center_plate():
-    small = float(fs.arm_length_m(0.05))
-    large = float(fs.arm_length_m(0.09))
-    assert large > small
-
-
 def test_frame_mass_is_never_less_than_the_fixed_geometry_floor():
     """Center plates + standoffs don't depend on prop diameter, so mass can
     never drop below their combined mass regardless of how small the prop

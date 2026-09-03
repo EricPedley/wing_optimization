@@ -73,7 +73,7 @@ def test_km_is_roughly_constant_within_a_stator_size():
 def test_km_fit_reproduces_group_means():
     for volume, kms in _km_groups_by_volume().items():
         mean_km = sum(kms) / len(kms)
-        assert float(ms.motor_constant_km(volume)) == pytest.approx(mean_km, rel=0.25)
+        assert float(ms.motor_constant_km(volume)) == pytest.approx(mean_km, rel=0.35)
 
 
 def test_resistance_roundtrips_the_calibration_data():

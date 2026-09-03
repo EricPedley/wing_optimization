@@ -57,12 +57,16 @@ def standoff_volume_m3():
 
 # --- Arms -------------------------------------------------------------------
 #
-# Each arm is a flat carbon plate running from the center plate's edge out to
-# where the prop needs to be: far enough that the prop tip clears the frame
+# Each arm is a flat carbon plate running from the center plate out to where
+# the prop needs to be: far enough that the prop tip clears the frame
 # (PROP_TIP_CLEARANCE_M) and, implicitly, clears the adjacent props (a
 # standard X/+ quad layout puts each motor at 45 degrees off the body's
 # X/Y axes, so this model does not need a separate prop-prop clearance check
-# -- the frame-clearance one dominates for any reasonable arm layout).
+# -- the frame-clearance one dominates for any reasonable arm layout). Arm
+# length is prop_radius + PROP_TIP_CLEARANCE_M directly (see arm_length_m) --
+# NOT measured relative to the center plate's own size, so it is always
+# positive and always grows with prop size, regardless of how the center
+# plate happens to be dimensioned.
 #
 # Arm width is not given by the ask ("IDK how wide the arms should be") and
 # is not derivable from anything else here, so it's a flat guess: wide enough
@@ -80,21 +84,22 @@ def arm_width_m(prop_diameter_m):
 
 
 def arm_length_m(prop_diameter_m):
-    """Center-plate corner to prop tip, along the arm's own direction.
+    """Center-plate edge to motor center, along the arm's own direction.
 
-    Motors sit on the plate's diagonal (standard X-quad layout), so the
-    relevant plate dimension is its half-diagonal, and the arm need only
-    span the straight-line gap from that corner out to where the tip
-    clearance requires the prop center to be. Floored at 0: for a small
-    enough prop the clearance point can fall inside the plate's own
-    footprint, at which point no arm length is needed at all (the motor
-    would mount straight to the plate corner).
+    A direct linear function of prop diameter: the arm has to put the motor
+    (and hence the whole prop disk) far enough out that the prop tip clears
+    the frame by PROP_TIP_CLEARANCE_M, full stop -- not "however far the tip
+    clearance circle reaches past the plate corner," which is what the prior
+    version computed (plate half-diagonal subtracted from tip reach) and
+    which is wrong: a propeller always has to stick out past the frame it is
+    bolted to, at ANY size, so an arm length derived that way can (and did)
+    come out at or below zero for small props, modeling the prop as mounted
+    inside the plate's own footprint. This version cannot do that: it is
+    prop_radius_m + PROP_TIP_CLEARANCE_M, always positive, always growing
+    with prop size.
     """
     prop_radius_m = 0.5 * prop_diameter_m
-    tip_reach_m = prop_radius_m + PROP_TIP_CLEARANCE_M
-    center_plate_half_diagonal_m = 0.5 * jnp.sqrt(
-        CENTER_PLATE_LENGTH_M ** 2 + CENTER_PLATE_WIDTH_M ** 2)
-    return jnp.maximum(tip_reach_m - center_plate_half_diagonal_m, 0.0)
+    return prop_radius_m + PROP_TIP_CLEARANCE_M
 
 
 def frame_mass_kg(prop_diameter_m):

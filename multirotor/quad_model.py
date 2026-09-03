@@ -84,15 +84,20 @@ SPIN_UP_BUDGET_S = 0.050
 SPEED_OF_SOUND_M_S = 343.0
 MAX_TIP_MACH = 0.9
 
-# Placeholder for everything not modeled elsewhere: FC/ESC stack, battery,
-# VTX, wiring. Frame mass used to be lumped in here too but now has its own
-# geometric estimate (see frame_scaling.py, added into total_mass in
-# evaluate()/hover_point() below), so this dropped from the original 0.040kg
-# by roughly a frame's worth. Still not fit from anything -- a rough guess
-# sized for a tiny 1S whoop/toothpick build (consistent with the 3.7V/12A
-# ESC) to get the optimizer running end to end. Replace once real
-# electronics are chosen; TWR is directly sensitive to this number.
-OTHER_MASS_KG = 0.023
+# Placeholder for everything not modeled elsewhere: FC/ESC stack, VTX,
+# antenna, camera, wiring. NOT the battery -- battery mass is added
+# separately and explicitly wherever a battery is chosen (see
+# battery_model.py's battery_mass_kg, threaded through hover_point/
+# _hover_point_jit and optimize_efficiency.py's realize step). Frame mass is
+# also separate (frame_scaling.py, added into total_mass in
+# evaluate()/hover_point() below).
+#
+# 0.016kg (16g), from a user estimate of a real FC+VTX+antenna+camera stack
+# for this build. Previously 0.023kg -- a rougher guess that turned out too
+# high once checked against a real reference build; see git history for that
+# prior value's own history (it in turn replaced an even older 0.040kg that
+# used to also cover frame mass before frame_scaling.py existed).
+OTHER_MASS_KG = 0.016
 
 # Motor thermal resistance is not modeled (see conversation: the stator
 # floor above stands in for a thermal constraint), but motor_model.equilibrium
