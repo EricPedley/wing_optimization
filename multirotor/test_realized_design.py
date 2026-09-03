@@ -67,35 +67,59 @@ def test_no_fully_specified_candidate_returns_none_best():
     assert not result["converged"]
 
 
-def test_prop_reoptimization_beats_the_unoptimized_prop():
-    """The whole point of the iteration: re-optimizing the prop for the
-    chosen real motor should do at least as well as evaluating that motor
-    with the ORIGINAL continuous optimizer's prop unchanged."""
-    x = qm.BASELINE
-    g = qm.unpack(x)
-    result = qm.realized_design(x, n_candidates=5, max_iters=3)
+def test_best_uses_a_real_catalogue_prop_by_default():
+    """realized_design's default (use_catalogue_props=True) should return a
+    real prop from prop_datasheets.csv, not an idealized (diameter, pitch,
+    blade_count) point -- that is the whole point of the catalogue."""
+    result = qm.realized_design(qm.BASELINE, n_candidates=5, max_iters=3)
     best = result["best"]
+    assert "prop" in best
+    assert best["prop"]["name"] is not None
+    # The evaluated diameter/pitch/blade_count should exactly match the
+    # chosen catalogue prop's own specs, not some other value.
+    assert float(best["prop_diameter_m"]) * 1e3 == pytest.approx(
+        best["prop"]["diameter_mm"], rel=1e-9)
+    assert float(best["pitch_m"]) * 1e3 == pytest.approx(
+        best["prop"]["pitch_mm"], rel=1e-9)
 
-    naive = qm._evaluate_motor_with_prop(
-        best["motor"], g["prop_diameter_m"], g["blade_count"], g["pitch_m"],
-        0.0, qm.VBAT, qm.OTHER_MASS_KG, qm.pa.CHORD_TO_DIAMETER_RATIO,
-        qm.pa.CL_ALPHA, qm.pa.CD0, qm.pa.INDUCED_POWER_FACTOR)
 
-    # Compare via cost (TWR minus constraint penalties), not raw TWR alone,
-    # since a naive prop might violate current/spin-up/tip-Mach constraints
-    # that the optimized prop respects.
-    def cost_of(r):
-        c = {
-            "current_slack_a": qm.ESC_MAX_CURRENT_A - float(r["current_a"]),
-            "spinup_slack_s": qm.SPIN_UP_BUDGET_S - float(r["spin_up_s"]),
-            "tip_mach_slack": qm.MAX_TIP_MACH - float(r["tip_mach"]),
-        }
-        penalty = qm.PENALTY_WEIGHT * sum(
-            max(-c[k] / scale, 0.0) ** 2 for k, scale in [
-                ("current_slack_a", qm.CURRENT_SCALE_A),
-                ("spinup_slack_s", qm.SPINUP_SCALE_S),
-                ("tip_mach_slack", qm.TIP_MACH_SCALE),
-            ])
-        return -float(r["twr"]) + penalty
+def test_best_catalogue_prop_for_motor_picks_the_best_of_its_own_candidates():
+    """_best_catalogue_prop_for_motor is a nearest-K heuristic, not an
+    exhaustive search (same caveat as nearest_catalogue_motor/
+    nearest_catalogue_prop) -- it is not guaranteed to find the GLOBAL best
+    real prop for a motor, only the best among the n_prop_candidates nearest
+    its query point. What it must do correctly is pick the best-scoring
+    option among the exact candidate set it looked at -- checked directly
+    here by calling nearest_catalogue_prop with the same query point and
+    confirming none of THOSE candidates beats what was returned."""
+    motor = qm.ms.nearest_catalogue_motor(qm.BASELINE[0], qm.BASELINE[1], n=1)[0]
+    prop_x0 = qm.BASELINE[2:5]
+    result, chosen_prop = qm._best_catalogue_prop_for_motor(
+        motor, 0.0, qm.VBAT, qm.OTHER_MASS_KG, qm.pa.CHORD_TO_DIAMETER_RATIO,
+        qm.pa.CL_ALPHA, qm.pa.CD0, qm.pa.INDUCED_POWER_FACTOR, prop_x0,
+        n_prop_candidates=6)
 
-    assert cost_of(best) <= cost_of(naive) + 1e-6
+    diameter_mm0 = float(prop_x0[0]) * 1e3
+    pitch_mm0 = float(prop_x0[2]) * 1e3
+    blade_count0 = float(prop_x0[1])
+    candidates = qm.ps.nearest_catalogue_prop(
+        diameter_mm0, pitch_mm0, blade_count0, n=6)
+    best_cost = qm._default_prop_cost(result)
+    for prop in candidates:
+        r = qm._evaluate_motor_with_prop(
+            motor, prop["diameter_mm"] * 1e-3, prop["blade_count"],
+            prop["pitch_mm"] * 1e-3, 0.0, qm.VBAT, qm.OTHER_MASS_KG,
+            qm.pa.CHORD_TO_DIAMETER_RATIO, qm.pa.CL_ALPHA, qm.pa.CD0,
+            qm.pa.INDUCED_POWER_FACTOR, prop_mass_kg_override=prop["mass_g"] * 1e-3)
+        assert qm._default_prop_cost(r) >= best_cost - 1e-9, (
+            f"{prop['name']} scores better than the chosen prop")
+
+
+def test_idealized_prop_search_still_available_as_a_fallback():
+    """use_catalogue_props=False should still run the old continuous LBFGSB
+    search and return an idealized (non-catalogue) prop, for callers that
+    specifically want that comparison."""
+    result = qm.realized_design(qm.BASELINE, n_candidates=5, max_iters=3,
+                                 use_catalogue_props=False)
+    best = result["best"]
+    assert "prop" not in best

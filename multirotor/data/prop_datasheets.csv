@@ -1,8 +1,35 @@
-diameter_mm,blade_count,mass_g,notes
-76.19999999999999,2,0.85,3in 2-blade
-76.19999999999999,3,1.3,3in 3-blade
-45.0,3,0.43,45mm 3-blade
-45.0,2,0.33,45mm 2-blade
-50.8,3,0.7,2in 3-blade
-60.959999999999994,3,0.63,2.4in 3-blade
-65.0,2,0.4,65mm 2-blade
+name,vendor,diameter_mm,pitch_mm,blade_count,mass_g,hub_bore_mm,source_url,notes
+3in 2-blade,unknown,76.19999999999999,,2,0.85,,,original repo calibration point; pitch/vendor not recorded
+3in 3-blade,unknown,76.19999999999999,,3,1.3,,,original repo calibration point; pitch/vendor not recorded
+45mm 3-blade,unknown,45.0,,3,0.43,,,original repo calibration point; pitch/vendor not recorded
+45mm 2-blade,unknown,45.0,,2,0.33,,,original repo calibration point; pitch/vendor not recorded
+2in 3-blade,unknown,50.8,,3,0.7,,,original repo calibration point; pitch/vendor not recorded
+2.4in 3-blade,unknown,60.959999999999994,,3,0.63,,,original repo calibration point; pitch/vendor not recorded
+65mm 2-blade,unknown,65.0,,2,0.4,,,original repo calibration point; pitch/vendor not recorded
+Gemfan 1614 40mm 3-blade,Gemfan,40.0,35.6,3,0.24,1.5,https://www.gemfanhobby.com/40mm-1614-pc-3-blade.html,P/D 0.89
+HQProp Ultralight 40mmx3,HQProp,40.0,28.0,3,0.28,1.5,https://www.hqprop.com/hq-ultralight-whoop-prop-40mmx3-grey-2cw2ccw-poly-carbonate-p0328.html,P/D 0.70
+HQProp Micro Whoop 45mmx2,HQProp,45.0,35.6,2,0.25,1.5,https://hqprop.com/hq-micro-whoop-prop-45mmx2-grey-2cw2ccw-poly-carbonate-15mm-shaft-p0409.html,P/D 0.79
+HQProp Ultralight Whoop 45mmx3,HQProp,45.0,30.5,3,0.33,1.5,https://www.hqprop.com/hq-micro-whoop-prop-18x12x345mm-2cw2ccw-poly-carbonate-15mm-shaft-p0410.html,P/D 0.68
+Gemfan 45mm 2-blade,Gemfan,45.0,38.1,2,0.33,1.5,https://www.getfpv.com/gemfan-45mm-2-blade-polycarbonate-propeller-set-of-8-1mm-1-5mm.html,P/D 0.85
+Gemfan 45mm 3-blade,Gemfan,45.0,38.1,3,0.43,1.5,https://www.getfpv.com/gemfan-45mm-3-blade-polycarbonate-propeller-set-of-8-1mm-1-5mm.html,P/D 0.85
+HQProp Ultralight 2x0.9 51mm,HQProp,51.0,22.9,2,0.27,1.5,https://www.hqprop.com/hq-ultralight-prop-2x09-51mm-grey2cw2ccw-pc-15mm-shaft-p0457.html,P/D 0.45
+HQProp 51mmx2,HQProp,51.0,38.1,2,0.36,1.5,,P/D 0.75; found via reseller listings
+Gemfan Hurricane 2008-2,Gemfan,51.3,20.3,2,0.30,1.5,https://www.gfprops.com/products/hurricane2008-2.html,P/D 0.40
+Gemfan Hurricane 2009-3,Gemfan,51.3,22.9,3,0.40,1.5,https://www.gfprops.com/products/gemfanhurricane2009-3.html,P/D 0.45
+Gemfan Hurricane 2015 2-blade,Gemfan,50.8,38.1,2,0.50,1.5,https://betafpv.com/products/gemfan-2015-2-blade-propellers-4pcs-1-5mm-shaft,P/D 0.75
+Gemfan Hurricane 2023-3,Gemfan,52.17,58.4,3,0.87,1.5,https://pyrodrone.com/products/gemfan-hurricane-2023-3-tri-blade-prop-4cw-4ccw,P/D 1.12; highest P/D among open (non-ducted) props found
+Gemfan D51 ducted 4-blade,Gemfan,50.3,50.8,4,0.91,1.5,,P/D 1.01; DUCTED cinewhoop prop -- aerodynamics not directly comparable to this repo's open-BEMT model
+Gemfan D51 ducted 5-blade,Gemfan,51.0,48.3,5,0.91,1.5,,P/D 0.95; DUCTED cinewhoop prop -- aerodynamics not directly comparable to this repo's open-BEMT model
+Gemfan 2218 3-blade,Gemfan,55.0,45.7,3,0.58,1.5,https://megadron.pl/en/products/gemfan-2218-3-blade-propellers-1-5-mm-shaft-black-31564.html,P/D 0.83; vendor listing states "2.32g" ambiguously (per-piece vs per-pack varies by reseller); megadron.pl states it explicitly as 2.32g/4-piece set (0.58g/prop) -- used that as the least ambiguous source
+HQProp T2.2x1.6x3,HQProp,56.0,40.6,3,0.67,1.5,,P/D 0.72; hub bore 9.2mm not shaft bore
+HQProp T2.2x2x3,HQProp,56.0,50.8,3,0.90,1.5,https://www.hqprop.com/hqprop-t22x2x3-grey-2cw2ccw-poly-carbonate-p0489.html,P/D 0.91; hub bore 10mm not shaft bore
+HQProp Micro Prop 65mm 2-blade,HQProp,65.0,25.4,2,0.46,1.5,https://www.hqprop.com/hq-micro-prop-65mm-5cw5ccw-poly-carbonate-15mm-shaft-p0200.html,P/D 0.39
+HQProp Ultralight 65mm 2-blade,HQProp,65.0,25.4,2,0.39,1.2,https://www.hqprop.com/hqprop-ultralight-65mm-2cw2ccw-poly-carbonate-p0424.html,P/D 0.39
+Gemfan D63 ducted 3-blade,Gemfan,63.5,76.2,3,1.4,1.5,https://www.gemfanhobby.com/d63-ducted-pc-3-blade.html,P/D 1.20; DUCTED cinewhoop prop -- aerodynamics not directly comparable to this repo's open-BEMT model; highest P/D in the whole catalogue
+Gemfan D63 ducted 5-blade,Gemfan,63.5,76.2,5,1.76,1.5,,P/D 1.20; DUCTED cinewhoop prop -- aerodynamics not directly comparable to this repo's open-BEMT model
+Gemfan Hurricane 2520-3,Gemfan,63.5,50.8,3,1.0,1.5,https://www.gfprops.com/products/hurricane2520-3.html,P/D 0.80
+HQProp T2.5x2x3V2S,HQProp,63.5,50.8,3,1.2,1.5,https://www.hqprop.com/hqprop-t25x2x3v2s-2cw2ccw-poly-carbonate-p0271.html,P/D 0.80; hub bore 9.8mm not shaft bore
+Gemfan Hurricane 3016,Gemfan,76.5,40.6,3,1.18,1.5,,P/D 0.53
+Gemfan Hurricane 3018-2,Gemfan,76.5,45.7,2,0.82,1.5,,P/D 0.60; mass averaged from 0.80-0.84g across sources
+HQProp T3x2x3,HQProp,76.2,50.8,3,1.2,1.5,,P/D 0.67; hub bore 9.8mm not shaft bore
+HQProp T3x3x3,HQProp,76.2,76.2,3,1.48,1.5,,P/D 1.00; open (non-ducted) prop; hub bore 9.8mm not shaft bore; ties for 2nd-highest open-prop P/D found

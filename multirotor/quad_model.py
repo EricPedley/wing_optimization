@@ -666,49 +666,68 @@ _PROP_N_STARTS = 24
 _PROP_POLISH_ITERS = 60
 
 
-@jax.jit
-def _solve_prop_for_motor(starts, kv, resistance, i0, motor_mass, vel, vbat, other_mass_kg,
-                           chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor):
-    """vmapped LBFGSB over `starts`, jitted as one unit -- same shape as
-    optimize.py's _solve, so the per-candidate/per-round multi-start search
-    this is called from (potentially dozens of times across
-    realized_design's iterations x n_candidates) stays fast: everything
-    inside is traced once and reused, instead of re-tracing a fresh LBFGSB
-    call from Python for every start.
-    """
-    def fun(prop_x):
-        return _prop_only_cost(prop_x, kv, resistance, i0, other_mass_kg, motor_mass,
-                                vel, vbat, chord_to_diameter_ratio, cl_alpha, cd0,
-                                induced_power_factor)
+def _make_solve_prop_for_motor(prop_cost_fn):
+    """Builds a jitted, vmapped-multi-start LBFGSB solver for a given
+    per-prop cost function, so realized_design's search machinery is reusable
+    for objectives other than "maximize TWR" -- e.g.
+    optimize_efficiency.py's "minimize hover current subject to a TWR floor"
+    needs the exact same nearest-motor/re-fit-the-prop loop, just scored
+    differently. prop_cost_fn must have the same signature as
+    _prop_only_cost (prop_x, kv, resistance, i0, other_mass_kg, motor_mass,
+    vel, vbat, chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor)
+    -> scalar cost to minimize."""
+    @jax.jit
+    def _solve(starts, kv, resistance, i0, motor_mass, vel, vbat, other_mass_kg,
+               chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor):
+        def fun(prop_x):
+            return prop_cost_fn(prop_x, kv, resistance, i0, other_mass_kg, motor_mass,
+                                 vel, vbat, chord_to_diameter_ratio, cl_alpha, cd0,
+                                 induced_power_factor)
 
-    def polish(x0):
-        res = LBFGSB(fun=fun, maxiter=_PROP_POLISH_ITERS).run(
-            x0, bounds=(_PROP_BOUNDS_LOWER, _PROP_BOUNDS_UPPER))
-        x = jnp.clip(res.params, _PROP_BOUNDS_LOWER, _PROP_BOUNDS_UPPER)
-        return x, fun(x)
+        def polish(x0):
+            res = LBFGSB(fun=fun, maxiter=_PROP_POLISH_ITERS).run(
+                x0, bounds=(_PROP_BOUNDS_LOWER, _PROP_BOUNDS_UPPER))
+            x = jnp.clip(res.params, _PROP_BOUNDS_LOWER, _PROP_BOUNDS_UPPER)
+            return x, fun(x)
 
-    xs, costs = jax.vmap(polish)(starts)
-    costs = jnp.where(jnp.isfinite(costs), costs, jnp.inf)
-    best = jnp.argmin(costs)
-    return xs[best], costs[best]
+        xs, costs = jax.vmap(polish)(starts)
+        costs = jnp.where(jnp.isfinite(costs), costs, jnp.inf)
+        best = jnp.argmin(costs)
+        return xs[best], costs[best]
+
+    return _solve
+
+
+# vmapped LBFGSB over a scatter of starts, jitted as one unit -- same shape as
+# optimize.py's _solve, so the per-candidate/per-round multi-start search
+# this is called from (potentially dozens of times across realized_design's
+# iterations x n_candidates) stays fast: everything inside is traced once
+# and reused, instead of re-tracing a fresh LBFGSB call from Python for every
+# start. Built once at import time for the default (TWR-maximizing) cost;
+# other cost functions build their own via _make_solve_prop_for_motor.
+_solve_prop_for_motor = _make_solve_prop_for_motor(_prop_only_cost)
 
 
 def _optimize_prop_for_motor(kv, resistance, i0, motor_mass, vel, vbat, other_mass_kg,
                               chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor,
-                              prop_x0):
+                              prop_x0, solve_fn=_solve_prop_for_motor):
     """Best (diameter, blade_count, pitch) for a fixed, fully-specified real
     motor. A handful of LBFGSB starts scattered plus the caller's previous
     prop as a seed -- this is a 3-variable, well-behaved sub-problem (the
     hard multi-modal search is what optimize.py's Adam/multi-start already
     solved to find a motor neighborhood; this only needs to locally refine
     the prop for one fixed motor), so it does not need Adam's global search.
+
+    solve_fn defaults to the TWR-maximizing solver but accepts one built by
+    _make_solve_prop_for_motor for a different objective (see
+    optimize_efficiency.py).
     """
     rng = np.random.default_rng(0)
     lo, hi = np.asarray(_PROP_BOUNDS_LOWER), np.asarray(_PROP_BOUNDS_UPPER)
     scatter = rng.random((_PROP_N_STARTS - 1, 3)) * (hi - lo) + lo
     starts = jnp.asarray(np.vstack([np.clip(np.asarray(prop_x0), lo, hi), scatter]))
 
-    best_x, best_cost = _solve_prop_for_motor(
+    best_x, best_cost = solve_fn(
         starts, kv, resistance, i0, motor_mass, vel, vbat, other_mass_kg,
         chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor)
     return best_x, best_cost
@@ -716,16 +735,23 @@ def _optimize_prop_for_motor(kv, resistance, i0, motor_mass, vel, vbat, other_ma
 
 def _evaluate_motor_with_prop(c, prop_diameter_m, blade_count, pitch_m, vel, vbat,
                                other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
-                               induced_power_factor):
+                               induced_power_factor, prop_mass_kg_override=None):
     """Full evaluate()-shaped result for one catalogue motor candidate `c`
     (see motor_scaling.nearest_catalogue_motor) paired with a specific prop.
+
+    prop_mass_kg_override, when given, replaces prop_scaling's fitted mass
+    estimate with a real part's own datasheet mass (see
+    prop_scaling.nearest_catalogue_prop) -- used when the prop itself is also
+    a real catalogue part, not just an idealized (diameter, pitch,
+    blade_count) point.
     """
     motor_mass = c["mass_g"] * 1e-3
     resistance = c["resistance_ohm"]
     i0 = c["i0_a"] if c["i0_a"] is not None else no_load_current_a(c["kv_rpm_per_v"])
 
     diameter_mm_ = prop_diameter_m * 1e3
-    prop_mass = ps.prop_mass_kg(diameter_mm_, blade_count)
+    prop_mass = (prop_mass_kg_override if prop_mass_kg_override is not None
+                 else ps.prop_mass_kg(diameter_mm_, blade_count))
     prop_inertia = ps.prop_inertia_kg_m2(prop_mass, diameter_mm_)
     aero = pa.to_simitl_params(prop_diameter_m, pitch_m, blade_count,
                                 chord_to_diameter_ratio, cl_alpha, cd0,
@@ -755,30 +781,101 @@ def _evaluate_motor_with_prop(c, prop_diameter_m, blade_count, pitch_m, vel, vba
         spin_up_s=spin_up_s, tip_mach=tip_mach, **full_throttle)
 
 
+def _default_prop_cost(result, min_twr=None):
+    """Default scoring for _best_catalogue_prop_for_motor: maximize TWR (same
+    objective the continuous _prop_only_cost defaults to), expressed as a
+    cost to MINIMIZE so lower is better, for consistency with every other
+    cost function in this module. min_twr is accepted for interface
+    symmetry with optimize_efficiency's scorer but unused here."""
+    return -float(result["twr"])
+
+
+def _best_catalogue_prop_for_motor(c, vel, vbat, other_mass_kg, chord_to_diameter_ratio,
+                                    cl_alpha, cd0, induced_power_factor, prop_x0,
+                                    n_prop_candidates=30, prop_cost_fn=_default_prop_cost):
+    """Best REAL, buyable propeller (see prop_scaling.nearest_catalogue_prop)
+    for a fixed, fully-specified real motor `c` -- the discrete counterpart
+    to _optimize_prop_for_motor's continuous LBFGSB search.
+
+    Both motor and prop are now small (~20 and ~27 entry) real catalogues, so
+    this is a brute-force evaluate-and-rank rather than a gradient search:
+    look up the n_prop_candidates real props nearest prop_x0 (the previous
+    round's diameter/pitch/blade_count, continuous or real), evaluate the
+    whole quad with each paired against motor `c` using ITS OWN datasheet
+    mass (not the fitted estimate), and keep whichever prop_cost_fn scores
+    best. prop_cost_fn takes an _evaluate_motor_with_prop-shaped result dict
+    and returns a scalar cost to minimize (default: -TWR); pass a different
+    one for a different objective, e.g. optimize_efficiency.py's hover
+    current subject to a TWR floor.
+
+    Returns (result, prop_row) -- the winning evaluate()-shaped dict and the
+    nearest_catalogue_prop row it came from -- or (None, None) if no real
+    prop is on record (should not happen with a non-empty catalogue, but
+    kept explicit rather than assumed).
+    """
+    diameter_mm0 = float(prop_x0[0]) * 1e3
+    pitch_mm0 = float(prop_x0[2]) * 1e3
+    blade_count0 = float(prop_x0[1])
+    prop_candidates = ps.nearest_catalogue_prop(
+        diameter_mm0, pitch_mm0, blade_count0, n=n_prop_candidates)
+
+    best_result, best_prop, best_cost = None, None, float("inf")
+    for prop in prop_candidates:
+        result = _evaluate_motor_with_prop(
+            c, prop["diameter_mm"] * 1e-3, prop["blade_count"], prop["pitch_mm"] * 1e-3,
+            vel, vbat, other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
+            induced_power_factor, prop_mass_kg_override=prop["mass_g"] * 1e-3)
+        result["prop"] = prop
+        cost = prop_cost_fn(result)
+        if cost < best_cost:
+            best_result, best_prop, best_cost = result, prop, cost
+
+    return best_result, best_prop
+
+
 def realized_design(x, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
-                     n_candidates=3, max_iters=6,
+                     n_candidates=3, n_prop_candidates=30, max_iters=6,
                      chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
                      cl_alpha=pa.CL_ALPHA, cd0=pa.CD0,
-                     induced_power_factor=pa.INDUCED_POWER_FACTOR):
+                     induced_power_factor=pa.INDUCED_POWER_FACTOR,
+                     prop_cost_fn=_default_prop_cost,
+                     use_catalogue_props=True, solve_fn=_solve_prop_for_motor):
     """Re-evaluate a design point's whole-quad performance using a real,
-    buyable motor's actual datasheet specs, with the propeller re-optimized
-    for that specific motor -- iterated to a fixed point, since picking a
-    motor and picking a prop are coupled (see the module comment above).
+    buyable motor AND a real, buyable propeller (see
+    prop_scaling.nearest_catalogue_prop) -- iterated to a fixed point, since
+    picking a motor and picking a prop are coupled (see the module comment
+    above).
 
     Each round: propose the n_candidates nearest catalogue motors to the
     current design point (motor_scaling.nearest_catalogue_motor), skip any
-    missing mass/resistance (can't be simulated), optimize the propeller for
-    each fully-specified candidate, and keep the motor+prop combination with
-    the best TWR. That winner becomes next round's design point. Stops when
-    the chosen motor is the same real part two rounds in a row, or after
-    max_iters rounds if it keeps oscillating between two similarly-good
+    missing mass/resistance (can't be simulated), find the best REAL prop for
+    each fully-specified candidate motor (via _best_catalogue_prop_for_motor:
+    brute-force evaluate the n_prop_candidates nearest catalogue props,
+    scored by prop_cost_fn -- default TWR-maximizing; pass a different one
+    for a different objective, e.g. optimize_efficiency.py's "minimize hover
+    current subject to a TWR floor"), and keep the motor+prop combination
+    prop_cost_fn scores best. That winner becomes next round's design point.
+    Stops when the chosen motor is the same real part two rounds in a row, or
+    after max_iters rounds if it keeps oscillating between two similarly-good
     motors (rare, but with only ~20 catalogue motors and no strict
     monotonicity proof across the swap, worth capping rather than assuming).
 
+    use_catalogue_props=False falls back to the OLD behavior: a continuous
+    LBFGSB search over idealized (diameter, pitch, blade_count) via solve_fn,
+    with no real prop backing it. Kept for callers that specifically want the
+    idealized-prop answer (e.g. to compare against the catalogue-snapped
+    one) -- but the idealized search has no penalty for wandering into a
+    pitch/diameter ratio no real prop in this size class has ever been sold
+    at (real open props top out around P/D~1.1, ducted cinewhoop props
+    ~1.2 -- see prop_scaling.nearest_catalogue_prop's docstring), which is
+    exactly the failure mode the catalogue-backed default exists to avoid.
+
     Returns a dict with "best" (the winning round's evaluate()-shaped result,
-    plus "motor", "prop_diameter_m", "blade_count", "pitch_m"; None if no
-    round ever found a fully-specified candidate), "converged" (True if the
-    motor choice stabilized before max_iters), and "iterations" (rounds run).
+    plus "motor", "prop_diameter_m", "blade_count", "pitch_m", and -- when
+    use_catalogue_props -- "prop", the winning prop_scaling.nearest_catalogue_prop
+    row; None if no round ever found a fully-specified candidate),
+    "converged" (True if the motor choice stabilized before max_iters), and
+    "iterations" (rounds run).
     """
     g = unpack(x)
     kv, volume = g["kv"], g["stator_volume_mm3"]
@@ -792,22 +889,35 @@ def realized_design(x, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
     for iterations in range(1, max_iters + 1):
         candidates = ms.nearest_catalogue_motor(kv, volume, n=n_candidates)
         round_best = None
-        round_best_cost = jnp.inf
+        round_best_cost = float("inf")
 
         for c in candidates:
             if c["mass_g"] is None or c["resistance_ohm"] is None:
                 continue
-            i0 = c["i0_a"] if c["i0_a"] is not None else no_load_current_a(c["kv_rpm_per_v"])
-            prop_x, prop_cost = _optimize_prop_for_motor(
-                c["kv_rpm_per_v"], c["resistance_ohm"], i0, c["mass_g"] * 1e-3,
-                vel, vbat, other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
-                induced_power_factor, prop_x0)
-            if prop_cost < round_best_cost:
-                diameter_m, blade_count, pitch_m = (float(v) for v in prop_x)
-                round_best_cost = prop_cost
-                round_best = _evaluate_motor_with_prop(
+
+            if use_catalogue_props:
+                result, prop = _best_catalogue_prop_for_motor(
+                    c, vel, vbat, other_mass_kg, chord_to_diameter_ratio, cl_alpha,
+                    cd0, induced_power_factor, prop_x0,
+                    n_prop_candidates=n_prop_candidates, prop_cost_fn=prop_cost_fn)
+                if result is None:
+                    continue
+                cost = prop_cost_fn(result)
+            else:
+                i0 = c["i0_a"] if c["i0_a"] is not None else no_load_current_a(c["kv_rpm_per_v"])
+                prop_vec, prop_cost = _optimize_prop_for_motor(
+                    c["kv_rpm_per_v"], c["resistance_ohm"], i0, c["mass_g"] * 1e-3,
+                    vel, vbat, other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
+                    induced_power_factor, prop_x0, solve_fn=solve_fn)
+                diameter_m, blade_count, pitch_m = (float(v) for v in prop_vec)
+                result = _evaluate_motor_with_prop(
                     c, diameter_m, blade_count, pitch_m, vel, vbat, other_mass_kg,
                     chord_to_diameter_ratio, cl_alpha, cd0, induced_power_factor)
+                cost = float(prop_cost)
+
+            if cost < round_best_cost:
+                round_best_cost = cost
+                round_best = result
 
         if round_best is None:
             break

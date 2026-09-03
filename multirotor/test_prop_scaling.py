@@ -1,8 +1,9 @@
 """Pins prop_scaling.py's fits to their calibration data.
 
-Not accuracy tests -- the mass fit is openly noisy (R^2 ~ 0.77 in log-log
-space, worst single point off by ~40%, see prop_scaling.py) -- these catch a
-fit breaking silently (NaN, sign flip) and pin the derived constants so a
+Not accuracy tests -- the mass fit is openly noisy (worst single point off
+by ~60% after widening the catalogue to 34 points across the 40-76mm range,
+see prop_scaling.py and data/prop_datasheets.csv) -- these catch a fit
+breaking silently (NaN, sign flip) and pin the derived constants so a
 recalibration shows up as a diff.
 
 Run with: uv run --with pytest python -m pytest multirotor/test_prop_scaling.py -q
@@ -21,13 +22,18 @@ def test_diameter_mm_converts_inches():
 
 def test_mass_fit_is_within_its_own_stated_error_bound():
     """Every calibration point should round-trip through the fit to within
-    the ~1.4x multiplicative error the module's docstring claims -- if a
-    future edit makes that bound tighter or looser, this is where it shows."""
+    a stated multiplicative error -- if a future edit makes that bound
+    tighter or looser, this is where it shows. Widened from the original
+    1.5x to 1.65x when the catalogue grew from 7 to 34 points spanning
+    lightweight ultralight-polycarbonate whoop props alongside heavier
+    freestyle props at the same diameter -- real added scatter, not a
+    tolerance masking a bug (see the 65mm 2-blade HQProp Ultralight point,
+    which is genuinely ~35% lighter than a same-sized Gemfan)."""
     for diameter, blades, mass_g in zip(
             ps._CAL_DIAMETER_MM, ps._CAL_BLADE_COUNT, ps._CAL_MASS_G):
         predicted_g = float(ps.prop_mass_kg(diameter, blades)) * 1e3
         ratio = predicted_g / float(mass_g)
-        assert 1.0 / 1.5 < ratio < 1.5, (
+        assert 1.0 / 1.65 < ratio < 1.65, (
             f"diameter={float(diameter)}mm blades={float(blades)}: "
             f"predicted {predicted_g:.3f}g vs actual {float(mass_g):.3f}g")
 

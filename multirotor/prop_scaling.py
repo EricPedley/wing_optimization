@@ -31,27 +31,26 @@ def diameter_mm(diameter_in):
 
 # --- Mass vs. diameter and blade count ---------------------------------------
 #
-# Seven datasheet points across five distinct diameters, two blade counts.
-# Fit as mass_per_blade = c * diameter^p, then multiplied by blade count --
-# i.e. each blade is assumed to weigh about the same regardless of how many
-# other blades share the hub, which is the natural first assumption and is
-# roughly borne out by the two same-diameter, different-blade-count pairs
-# below (76.2mm: 0.425 vs 0.433 g/blade, ~2% apart; 45mm: 0.143 vs 0.165
-# g/blade, ~13% apart) -- close enough that blade count is not the dominant
-# source of scatter here.
+# 34 datasheet points across the 40-76mm diameter range, most from real
+# vendor SKUs (Gemfan, HQProp) -- widened from an original 7 hand-picked
+# points. Fit as mass_per_blade = c * diameter^p, then multiplied by blade
+# count -- i.e. each blade is assumed to weigh about the same regardless of
+# how many other blades share the hub, which is the natural first assumption
+# and is roughly borne out where same-diameter/different-blade-count pairs
+# exist in the data (e.g. the 45mm Gemfan pair: 0.165 vs 0.143 g/blade, ~13%
+# apart) -- close enough that blade count is not the dominant source of
+# scatter here.
 #
-# Diameter is: not everything else about a propeller is scattered -- 45mm and
-# 60.96mm are both 3-blade and only 16mm apart, but the 45mm one is *lighter
-# per blade* (0.143 g) than the 50.8mm one (0.233 g), which in turn is
-# heavier per blade than the 60.96mm one (0.21 g). That last pair is not just
-# noisy, it is non-monotonic: a strictly bigger propeller (60.96mm > 50.8mm)
-# weighing less. Real propellers vary in chord, thickness, and hub/rib design
-# independent of diameter -- a fit against diameter alone cannot see any of
-# that, and this data shows it. The power-law fit below has R^2 ~ 0.77 in
-# log-log space and the single worst point misses by ~40%. Treat any one
-# prediction from this fit as good to a factor of ~1.4, not as a precise
-# number -- fine for picking a rough design point, not for picking between
-# two similar-sized props.
+# Diameter is: not everything else about a propeller is scattered -- material
+# (ultralight polycarbonate vs. standard), rib/hub design, and freestyle vs.
+# whoop-class geometry all vary independent of diameter, and this data shows
+# it (e.g. HQProp's "Ultralight" line runs consistently 20-35% lighter per
+# blade than a same-diameter standard prop). The worst single calibration
+# point misses the fit by ~1.6x. Treat any one prediction from this fit as
+# good to roughly that factor, not as a precise number -- fine for picking a
+# rough design point, not for picking between two similar-sized props. This
+# is exactly the situation nearest_catalogue_prop below is for: when a real
+# part's own mass matters more than the fit's extrapolation.
 _PROP_ROWS = _read_prop_datasheets()
 _CAL_DIAMETER_MM = jnp.array([float(row["diameter_mm"]) for row in _PROP_ROWS])
 _CAL_BLADE_COUNT = jnp.array([float(row["blade_count"]) for row in _PROP_ROWS])
@@ -101,3 +100,80 @@ def prop_inertia_kg_m2(mass_kg, diameter_mm_):
     """Rotational inertia about the shaft, kg.m^2, from mass and diameter."""
     radius_m = 0.5 * diameter_mm_ * 1e-3
     return _INERTIA_SHAPE_FACTOR * mass_kg * radius_m ** 2
+
+
+# --- Nearest real, buyable propeller ------------------------------------------
+#
+# The fits above answer "what would a prop at this (diameter, blade_count) be
+# like" for a continuous optimizer; this answers "what actual part should I
+# order" -- the closest prop in data/prop_datasheets.csv by normalized
+# distance in (diameter, pitch, blade_count), the propeller-side counterpart
+# to motor_scaling.nearest_catalogue_motor.
+#
+# Only rows with a recorded pitch are eligible: the original 7 calibration
+# points (kept for the mass fit above) predate this catalogue and have no
+# pitch on record, so they cannot be meaningfully compared against a
+# (diameter, pitch, blade_count) design point.
+#
+# This lookup is also the tool for catching the failure mode this catalogue
+# was specifically built to check: prop_aero_model.py's BEMT fit has no
+# built-in penalty for an unrealistic pitch/diameter ratio (unlike
+# quad_model.MAX_TIP_MACH, which exists precisely because the model was once
+# caught extrapolating a similar way -- see that constant's docstring
+# history). Real open (non-ducted) props at this diameter range top out
+# around P/D ~1.1; ducted cinewhoop props reach ~1.2. A "nearest" match with
+# a large distance, or a design point with P/D well above ~1.2, is a signal
+# the continuous optimizer has wandered into a region with no real part to
+# back it up, not a legitimately efficient design.
+_DIAMETER_SCALE_MM = 15.0
+_PITCH_SCALE_MM = 15.0
+_BLADE_SCALE = 1.0
+
+
+def pitch_to_diameter_ratio(diameter_mm_, pitch_mm_):
+    """P/D -- see the module comment above for why this ratio matters: it is
+    the single number most predictive of whether a design point corresponds
+    to anything real vendors sell in this size class."""
+    return pitch_mm_ / jnp.maximum(diameter_mm_, 1e-9)
+
+
+def nearest_catalogue_prop(diameter_mm_, pitch_mm_, blade_count, n=3):
+    """The n closest real props in data/prop_datasheets.csv, nearest first.
+
+    Distance is normalized Euclidean in (diameter, pitch, blade_count) --
+    _DIAMETER_SCALE_MM/_PITCH_SCALE_MM/_BLADE_SCALE are rough "how much of a
+    difference matters" scales, not a fit, so treat the ranking as
+    approximate near ties -- same caveat as
+    motor_scaling.nearest_catalogue_motor.
+    """
+    diameter_mm_ = float(diameter_mm_)
+    pitch_mm_ = float(pitch_mm_)
+    blade_count = float(blade_count)
+
+    scored = []
+    for row in _PROP_ROWS:
+        if not row["pitch_mm"]:
+            continue
+        row_diameter = float(row["diameter_mm"])
+        row_pitch = float(row["pitch_mm"])
+        row_blades = float(row["blade_count"])
+        dist = (
+            ((diameter_mm_ - row_diameter) / _DIAMETER_SCALE_MM) ** 2
+            + ((pitch_mm_ - row_pitch) / _PITCH_SCALE_MM) ** 2
+            + ((blade_count - row_blades) / _BLADE_SCALE) ** 2
+        )
+        scored.append({
+            "name": row["name"],
+            "vendor": row["vendor"],
+            "diameter_mm": row_diameter,
+            "pitch_mm": row_pitch,
+            "blade_count": row_blades,
+            "mass_g": float(row["mass_g"]),
+            "hub_bore_mm": float(row["hub_bore_mm"]) if row["hub_bore_mm"] else None,
+            "pitch_to_diameter": row_pitch / row_diameter,
+            "source_url": row["source_url"],
+            "notes": row["notes"],
+            "distance": dist ** 0.5,
+        })
+    scored.sort(key=lambda s: s["distance"])
+    return scored[:n]
