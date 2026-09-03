@@ -46,7 +46,8 @@ def test_hover_point_thrust_matches_weight():
     g = qm.unpack(qm.BASELINE)
     unit = qm.motor_prop_unit(g["kv"], g["stator_volume_mm3"], g["prop_diameter_m"],
                                g["blade_count"], g["pitch_m"])
-    total_mass = qm.OTHER_MASS_KG + 4.0 * (unit["motor_mass"] + unit["prop_mass"])
+    frame_mass = qm.fs.frame_mass_kg(g["prop_diameter_m"])
+    total_mass = qm.OTHER_MASS_KG + frame_mass + 4.0 * (unit["motor_mass"] + unit["prop_mass"])
     weight_n = total_mass * qm.G
 
     r = qm.hover_point(qm.BASELINE)

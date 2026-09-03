@@ -124,6 +124,7 @@ def _print_report(x):
         ("resistance, ohm", float(r["unit"]["resistance"]), "{:.4f}"),
         ("motor mass, g", float(r["unit"]["motor_mass"]) * 1e3, "{:.2f}"),
         ("prop mass, g", float(r["unit"]["prop_mass"]) * 1e3, "{:.2f}"),
+        ("frame mass (est.), g", float(r["frame_mass"]) * 1e3, "{:.2f}"),
         ("total mass, g", float(r["total_mass"]) * 1e3, "{:.1f}"),
         ("rpm @ full throttle", float(r["rpm"]), "{:.0f}"),
         ("thrust/motor, N", float(r["thrust_n"]), "{:.3f}"),

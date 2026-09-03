@@ -20,6 +20,7 @@ system's aggregate thrust, current, and spin-up time.
 import jax
 import jax.numpy as jnp
 
+import multirotor.frame_scaling as fs
 import multirotor.motor_model as mm
 import multirotor.motor_scaling as ms
 import multirotor.prop_aero_model as pa
@@ -80,12 +81,15 @@ SPIN_UP_BUDGET_S = 0.050
 SPEED_OF_SOUND_M_S = 343.0
 MAX_TIP_MACH = 0.9
 
-# Placeholder for everything not modeled elsewhere: frame, FC/ESC stack,
-# battery, VTX, wiring. Not fit from anything -- a rough guess sized for a
-# tiny 1S whoop/toothpick build (consistent with the 3.7V/12A ESC) to get
-# the optimizer running end to end. Replace once an airframe is chosen; TWR
-# is directly sensitive to this number.
-OTHER_MASS_KG = 0.040
+# Placeholder for everything not modeled elsewhere: FC/ESC stack, battery,
+# VTX, wiring. Frame mass used to be lumped in here too but now has its own
+# geometric estimate (see frame_scaling.py, added into total_mass in
+# evaluate()/hover_point() below), so this dropped from the original 0.040kg
+# by roughly a frame's worth. Still not fit from anything -- a rough guess
+# sized for a tiny 1S whoop/toothpick build (consistent with the 3.7V/12A
+# ESC) to get the optimizer running end to end. Replace once real
+# electronics are chosen; TWR is directly sensitive to this number.
+OTHER_MASS_KG = 0.023
 
 # Motor thermal resistance is not modeled (see conversation: the stator
 # floor above stands in for a thermal constraint), but motor_model.equilibrium
@@ -173,7 +177,9 @@ def evaluate(x, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
                             g["pitch_m"], chord_to_diameter_ratio, cl_alpha,
                             cd0, induced_power_factor)
 
-    total_mass = other_mass_kg + 4.0 * (unit["motor_mass"] + unit["prop_mass"])
+    frame_mass = fs.frame_mass_kg(g["prop_diameter_m"])
+    total_mass = (other_mass_kg + frame_mass
+                  + 4.0 * (unit["motor_mass"] + unit["prop_mass"]))
     weight_n = total_mass * G
 
     full_throttle = mm.equilibrium(
@@ -194,9 +200,9 @@ def evaluate(x, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
     tip_speed_m_s = jnp.pi * g["prop_diameter_m"] * full_throttle["rpm"] / 60.0
     tip_mach = tip_speed_m_s / SPEED_OF_SOUND_M_S
 
-    return dict(unit=unit, total_mass=total_mass, weight_n=weight_n,
-                twr=twr, spin_up_s=spin_up_s, tip_mach=tip_mach,
-                **full_throttle)
+    return dict(unit=unit, frame_mass=frame_mass, total_mass=total_mass,
+                weight_n=weight_n, twr=twr, spin_up_s=spin_up_s,
+                tip_mach=tip_mach, **full_throttle)
 
 
 def current_at_throttle_a(x, throttle_frac, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
@@ -332,7 +338,9 @@ def hover_point(x, battery_mah=680.0, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MA
     unit = motor_prop_unit(g["kv"], g["stator_volume_mm3"], g["prop_diameter_m"],
                             g["blade_count"], g["pitch_m"], chord_to_diameter_ratio,
                             cl_alpha, cd0, induced_power_factor)
-    total_mass = other_mass_kg + 4.0 * (unit["motor_mass"] + unit["prop_mass"])
+    frame_mass = fs.frame_mass_kg(g["prop_diameter_m"])
+    total_mass = (other_mass_kg + frame_mass
+                  + 4.0 * (unit["motor_mass"] + unit["prop_mass"]))
     weight_n = total_mass * G
     thrust_needed_per_motor = weight_n / 4.0
 
@@ -418,3 +426,87 @@ def cost(x, vel=0.0):
         + penalty(c["tip_mach_slack"], TIP_MACH_SCALE)
     )
     return -r["twr"] + total_penalty
+
+
+# --- Realized design: snap to an actually-buyable motor ----------------------
+#
+# The optimizer searches kV and stator_volume_mm3 as continuous variables and
+# motor_scaling.py's fits stand in for "what would a motor here be like" --
+# useful for search, but nothing says a motor at the optimizer's exact
+# (kV, volume) is sold. This answers the question a build actually needs:
+# given the optimizer's design point, which real cataloged motor (see
+# data/motor_datasheets.csv) is closest, and what does the whole quad's
+# performance look like using THAT motor's real datasheet mass/R/I0 instead
+# of the fitted estimates -- i.e. the number you'd actually get, not the
+# number the continuous search believes.
+#
+# Propeller sizing is left as the fitted/BEMT estimate (diameter, pitch, and
+# blade count are continued to be treated as freely choosable -- a much wider
+# aftermarket exists for props than for motors, and matching a specific
+# catalogue prop is a separate, harder problem noted in prop_scaling.py).
+
+
+def realized_design(x, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
+                     n_candidates=3, chord_to_diameter_ratio=pa.CHORD_TO_DIAMETER_RATIO,
+                     cl_alpha=pa.CL_ALPHA, cd0=pa.CD0,
+                     induced_power_factor=pa.INDUCED_POWER_FACTOR):
+    """Re-evaluate a design point's whole-quad performance using the nearest
+    real, buyable motor's actual datasheet specs in place of the fitted ones.
+
+    Returns a dict with "candidates" (the n_candidates nearest catalogue
+    motors, nearest first, from motor_scaling.nearest_catalogue_motor) and
+    "best", the full evaluate()-shaped result for the nearest candidate that
+    has a complete datasheet (mass, resistance, and I0 all present) -- a
+    motor missing any of those can't be simulated, so it is skipped in favor
+    of the next-nearest fully specified one. best is None if no candidate
+    among the n_candidates nearest is fully specified; widen n_candidates in
+    that case.
+
+    I0 falls back to no_load_current_a(kv) (the same unfit placeholder
+    evaluate() uses) when a real datasheet doesn't publish it, since I0's
+    effect on the physics is secondary (see no_load_current_a's docstring)
+    and most vendor listings that give R also give at least an idle current.
+    """
+    g = unpack(x)
+    candidates = ms.nearest_catalogue_motor(
+        g["kv"], g["stator_volume_mm3"], n=n_candidates)
+
+    best = None
+    for c in candidates:
+        if c["mass_g"] is None or c["resistance_ohm"] is None:
+            continue
+        motor_mass = c["mass_g"] * 1e-3
+        resistance = c["resistance_ohm"]
+        i0 = c["i0_a"] if c["i0_a"] is not None else no_load_current_a(g["kv"])
+
+        diameter_mm_ = g["prop_diameter_m"] * 1e3
+        prop_mass = ps.prop_mass_kg(diameter_mm_, g["blade_count"])
+        prop_inertia = ps.prop_inertia_kg_m2(prop_mass, diameter_mm_)
+        aero = pa.to_simitl_params(g["prop_diameter_m"], g["pitch_m"], g["blade_count"],
+                                    chord_to_diameter_ratio, cl_alpha, cd0,
+                                    induced_power_factor)
+
+        total_mass = other_mass_kg + 4.0 * (motor_mass + prop_mass)
+        weight_n = total_mass * G
+
+        full_throttle = mm.equilibrium(
+            vbat, vel, c["kv_rpm_per_v"], resistance, i0, PLACEHOLDER_MOTOR_RTH,
+            aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
+            aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
+
+        twr = 4.0 * full_throttle["thrust_n"] / jnp.maximum(weight_n, 1e-9)
+        spin_up_s = mm.spin_up_time_s(
+            SPIN_UP_START_FRAC * vbat, SPIN_UP_END_FRAC * vbat, vel,
+            c["kv_rpm_per_v"], resistance, i0, aero["prop_a_factor"],
+            aero["prop_torque_factor"], aero["prop_max_rpm"], aero["thrust_factor_x"],
+            aero["thrust_factor_y"], aero["thrust_factor_z"], prop_inertia)
+        tip_speed_m_s = jnp.pi * g["prop_diameter_m"] * full_throttle["rpm"] / 60.0
+        tip_mach = tip_speed_m_s / SPEED_OF_SOUND_M_S
+
+        best = dict(
+            motor=c, motor_mass=motor_mass, prop_mass=prop_mass,
+            total_mass=total_mass, weight_n=weight_n, twr=twr,
+            spin_up_s=spin_up_s, tip_mach=tip_mach, **full_throttle)
+        break
+
+    return {"candidates": candidates, "best": best}

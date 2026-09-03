@@ -121,3 +121,59 @@ def motor_resistance_ohm(kv, volume_mm3):
     kt = mm.motor_constant(kv)
     km = motor_constant_km(volume_mm3)
     return (kt / jnp.maximum(km, 1e-12)) ** 2
+
+
+# --- Nearest real, buyable motor ---------------------------------------------
+#
+# The fits above answer "what would a motor at this (kV, stator volume) be
+# like" for an optimizer searching a continuous box; this answers the
+# different question "what actual part should I order" -- the closest motor
+# in data/motor_datasheets.csv by normalized distance in (kV, stator volume),
+# with its real datasheet mass/R/I0 rather than the fitted estimate, so a
+# reported TWR/current/etc. can be re-checked against a buildable part
+# instead of an interpolated one.
+
+_KV_SCALE_RPM_PER_V = 10000.0  # normalizes kV and volume onto comparable scales
+_VOLUME_SCALE_MM3 = 300.0      # for a nearest-neighbor distance in 2D
+
+
+def nearest_catalogue_motor(kv, volume_mm3, n=3):
+    """The n closest real motors in data/motor_datasheets.csv, nearest first.
+
+    Distance is normalized Euclidean in (kV, stator volume) -- KV_SCALE and
+    VOLUME_SCALE are rough "how much of a difference matters" scales, not a
+    fit, so treat the ranking as approximate near ties. Only rows with a
+    known kV and stator size are considered; rows missing R/I0/mass are still
+    returned (with those fields as None) since even a mechanical-only match
+    (e.g. confirming a stator size exists) is useful, but callers wanting a
+    fully specified part should filter on "resistance_ohm" being present.
+    """
+    kv = float(kv)
+    volume_mm3 = float(volume_mm3)
+
+    def _float_or_none(s):
+        return float(s) if s else None
+
+    scored = []
+    for row in _MOTOR_ROWS:
+        row_kv = float(row["kv_rpm_per_v"])
+        row_volume = stator_volume_mm3(
+            float(row["stator_diameter_mm"]), float(row["stator_height_mm"]))
+        dist = ((kv - row_kv) / _KV_SCALE_RPM_PER_V) ** 2 + (
+            (volume_mm3 - row_volume) / _VOLUME_SCALE_MM3) ** 2
+        scored.append({
+            "name": row["name"],
+            "vendor": row["vendor"],
+            "stator_diameter_mm": float(row["stator_diameter_mm"]),
+            "stator_height_mm": float(row["stator_height_mm"]),
+            "volume_mm3": row_volume,
+            "kv_rpm_per_v": row_kv,
+            "mass_g": _float_or_none(row["mass_g"]),
+            "resistance_ohm": _float_or_none(row["resistance_ohm"]),
+            "i0_a": _float_or_none(row["i0_a"]),
+            "max_current_a": _float_or_none(row["max_current_a"]),
+            "source_url": row["source_url"],
+            "distance": dist ** 0.5,
+        })
+    scored.sort(key=lambda s: s["distance"])
+    return scored[:n]

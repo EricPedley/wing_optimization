@@ -403,14 +403,15 @@ def _status(best, rollouts, objective, enabled, thresholds, assumptions):
     # --- Weight breakdown ---------------------------------------------------
     unit = bm["unit"]
     other_g = assumptions["other_mass_kg"] * 1e3
+    frame_g = bm["frame_mass"] * 1e3
     motors_g = unit["motor_mass"] * 4.0 * 1e3
     props_g = unit["prop_mass"] * 4.0 * 1e3
     propulsion_g = motors_g + props_g
     total_g = bm["total_mass"] * 1e3
     lines.append(html.Div("Weight breakdown:", style={"fontWeight": "bold", "paddingTop": "6px"}))
     lines.append(html.Div(
-        f"  Everything else: {other_g:.2f} g   |   Propulsion (4x motor+prop): "
-        f"{propulsion_g:.2f} g   |   Total: {total_g:.2f} g",
+        f"  Everything else: {other_g:.2f} g   |   Frame (est.): {frame_g:.2f} g   |   "
+        f"Propulsion (4x motor+prop): {propulsion_g:.2f} g   |   Total: {total_g:.2f} g",
         style={"fontSize": "0.9em"},
     ))
     lines.append(html.Div(
