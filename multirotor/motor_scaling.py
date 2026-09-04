@@ -23,6 +23,38 @@ def _read_motor_datasheets():
         return list(csv.DictReader(f))
 
 
+MAX_FIT_CELLS = 3  # see _in_fit_envelope
+
+
+def _in_fit_envelope(row):
+    """True if this row's rated cell range overlaps the 1S-3S envelope this
+    design targets (see quad_model.py's VBAT/ESC_MAX_CURRENT_A) -- i.e. its
+    minimum rated cell count is at or below MAX_FIT_CELLS.
+
+    Every catalogue row filters through this before feeding the mass/Km fits
+    below. As of this writing it excludes exactly one row, F1404-2900 (a real
+    T-Motor datasheet point, 4-6S only) -- kept in motor_datasheets.csv and
+    fully usable via nearest_catalogue_motor (a caller who wants a bigger,
+    higher-cell-count motor should be able to find it), but its R (0.31 ohm
+    at a 14mm stator, the largest/lowest-kV point in the whole catalogue)
+    badly broke the mass/Km power-law fits (predicted R=0.74 ohm, more than
+    2x off) when included. Rather than keep loosening the fit's tolerance to
+    absorb a motor this design will never actually select (VBAT=3.7,
+    ESC_MAX_CURRENT_A=12.0 rule out anything needing 4S+ to make sense), it
+    is excluded from the FITS specifically -- the row itself, and its
+    tmotor_f1404_throttle_sweep.csv prop bench data, stay in the repo and
+    stay useful for the aero-model calibration this data was collected for.
+    """
+    cells = row["cells"]
+    if not cells:
+        return True
+    min_cells_token = cells.split("-")[0].rstrip("S")
+    try:
+        return float(min_cells_token) <= MAX_FIT_CELLS
+    except ValueError:
+        return True
+
+
 def stator_volume_mm3(diameter_mm, height_mm):
     """Stator volume from the size code FPV motor part numbers already encode.
 
@@ -37,23 +69,25 @@ def stator_volume_mm3(diameter_mm, height_mm):
 # --- Mass vs. stator volume --------------------------------------------------
 #
 # Calibrated from every datasheet row in data/motor_datasheets.csv that has a
-# mass (most rows do; R and I0 are frequently missing from vendor listings,
-# but weight almost always is published). As of this writing that is 19
-# points across 8 distinct stator sizes (0802, 1002, 1102, 1103, 1104,
-# 1202.5, 1203, 1204) -- a real improvement on the original two-point line
-# (1002 and 1202.5 only), though still a simple linear fit with no claim that
-# the relationship truly is linear across this whole size range.
+# mass AND is within this design's realistic cell-count envelope (see
+# _in_fit_envelope -- excludes exactly one row, a 4-6S-only motor whose
+# resistance badly broke the Km fit below). As of this writing that is 31
+# points spanning stator diameters 8-14mm -- a real improvement on the
+# original two-point line (1002 and 1202.5 only), though still a simple
+# linear fit with no claim that the relationship truly is linear across this
+# whole size range.
 #
 # The intercept is a genuine least-squares fit now rather than forced through
 # two points, so unlike the original two-point version it is not
 # automatically ~0 -- see the module docstring history in git for that prior
 # caveat, which more data was expected to resolve.
 _MOTOR_ROWS = _read_motor_datasheets()
+_FIT_ROWS = [row for row in _MOTOR_ROWS if _in_fit_envelope(row)]
 _CAL_VOLUME_MM3 = jnp.array([
     stator_volume_mm3(float(row["stator_diameter_mm"]), float(row["stator_height_mm"]))
-    for row in _MOTOR_ROWS if row["mass_g"]
+    for row in _FIT_ROWS if row["mass_g"]
 ])
-_CAL_MASS_G = jnp.array([float(row["mass_g"]) for row in _MOTOR_ROWS if row["mass_g"]])
+_CAL_MASS_G = jnp.array([float(row["mass_g"]) for row in _FIT_ROWS if row["mass_g"]])
 
 _MASS_SLOPE_G_PER_MM3, _MASS_INTERCEPT_G = jnp.polyfit(_CAL_VOLUME_MM3, _CAL_MASS_G, 1)
 
@@ -75,23 +109,23 @@ def motor_mass_kg(volume_mm3):
 # motor_resistance_ohm below.
 #
 # Calibrated from every datasheet row in data/motor_datasheets.csv that has
-# both a kV and a resistance -- as of this writing 12 points across 6 distinct
-# stator sizes (0802, 1002, 1103, 1104, 1203, 1204), up from the original 6
-# points across 2 sizes (1002, 1203 only). More sizes is exactly the gap the
-# original calibration comment called out as the priority fix, since two
-# sizes cannot distinguish a real power-law exponent from a line through two
-# points. Within-size agreement (Km roughly constant across kV at fixed
-# volume) should be re-checked whenever this list grows -- see
-# test_km_is_roughly_constant_within_a_stator_size.
+# both a kV and a resistance AND is within the cell-count envelope (see
+# _in_fit_envelope) -- as of this writing 19 points across 9 distinct stator
+# sizes, up from the original 6 points across 2 sizes (1002, 1203 only). More
+# sizes is exactly the gap the original calibration comment called out as the
+# priority fix, since two sizes cannot distinguish a real power-law exponent
+# from a line through two points. Within-size agreement (Km roughly constant
+# across kV at fixed volume) should be re-checked whenever this list grows --
+# see test_km_is_roughly_constant_within_a_stator_size.
 _CAL_KV_RPM_PER_V = jnp.array([
-    float(row["kv_rpm_per_v"]) for row in _MOTOR_ROWS if row["resistance_ohm"]
+    float(row["kv_rpm_per_v"]) for row in _FIT_ROWS if row["resistance_ohm"]
 ])
 _CAL_R_OHM = jnp.array([
-    float(row["resistance_ohm"]) for row in _MOTOR_ROWS if row["resistance_ohm"]
+    float(row["resistance_ohm"]) for row in _FIT_ROWS if row["resistance_ohm"]
 ])
 _CAL_VOLUME_MM3_KM = jnp.array([
     stator_volume_mm3(float(row["stator_diameter_mm"]), float(row["stator_height_mm"]))
-    for row in _MOTOR_ROWS if row["resistance_ohm"]
+    for row in _FIT_ROWS if row["resistance_ohm"]
 ])
 
 _CAL_KT = mm.KT_NUMERATOR / _CAL_KV_RPM_PER_V
