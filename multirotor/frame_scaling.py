@@ -22,7 +22,7 @@ import jax.numpy as jnp
 CARBON_FIBER_DENSITY_KG_M3 = 1600.0  # typical CF plate, 1.5-1.8 g/cm^3
 ALUMINUM_DENSITY_KG_M3 = 2700.0
 
-PLATE_THICKNESS_M = 2.0e-3
+PLATE_THICKNESS_M = 2.5e-3
 
 # --- Center plate -------------------------------------------------------------
 #
@@ -30,9 +30,9 @@ PLATE_THICKNESS_M = 2.0e-3
 # (20mm x 60mm footprint) plus a little edge margin around each standoff so
 # it isn't sitting right at the plate boundary. Two plates (top + bottom)
 # sandwich the standoffs, hence "double plates" in the ask.
-STANDOFF_FOOTPRINT_X_M = 20.0e-3
-STANDOFF_FOOTPRINT_Y_M = 60.0e-3
-CENTER_PLATE_MARGIN_M = 5.0e-3  # edge margin around the standoff footprint
+STANDOFF_FOOTPRINT_X_M = 24.0e-3
+STANDOFF_FOOTPRINT_Y_M = 90.0e-3
+CENTER_PLATE_MARGIN_M = 0.0e-3  # edge margin around the standoff footprint
 
 CENTER_PLATE_LENGTH_M = STANDOFF_FOOTPRINT_Y_M + 2.0 * CENTER_PLATE_MARGIN_M
 CENTER_PLATE_WIDTH_M = STANDOFF_FOOTPRINT_X_M + 2.0 * CENTER_PLATE_MARGIN_M
