@@ -33,3 +33,8 @@ Gemfan Hurricane 3016,Gemfan,76.5,40.6,3,1.18,1.5,,P/D 0.53
 Gemfan Hurricane 3018-2,Gemfan,76.5,45.7,2,0.82,1.5,,P/D 0.60; mass averaged from 0.80-0.84g across sources
 HQProp T3x2x3,HQProp,76.2,50.8,3,1.2,1.5,,P/D 0.67; hub bore 9.8mm not shaft bore
 HQProp T3x3x3,HQProp,76.2,76.2,3,1.48,1.5,,P/D 1.00; open (non-ducted) prop; hub bore 9.8mm not shaft bore; ties for 2nd-highest open-prop P/D found
+Gemfan 75mm 2-blade Toothpick,Gemfan,75.0,22.9,2,0.48,1.5,https://www.getfpv.com/gemfan-75mm-3-2-blade-toothpick-propeller-1-5mm-shaft-set-of-8.html,P/D 0.31; 41% lighter than Hurricane 3018-2 at same diameter but much lower pitch; confirmed across 3 independent retailer listings
+HQProp T3x1.5x3,HQProp,76.2,38.1,3,1.13,1.5,https://wrekd.com/products/hq-prop-t3x1-5x3-durable-tri-blade-3-prop-4-pack-grey,P/D 0.50; marketed specifically for 11xx-class motors
+HQProp T3x2x2,HQProp,76.2,50.8,2,0.95,1.5,https://www.amazon.com/HQProp-Propeller-Brushless-Quadcopter-Toothpick/dp/B07VNFRTSV,P/D 0.67; marketed specifically for 1104/1105-class motors
+Dalprop T3018,Dalprop,76.0,45.7,3,1.3,1.5,,P/D 0.60; moderate confidence -- vendor page 403'd, weight from search snippets
+Dalprop T3028,Dalprop,76.0,71.0,3,1.5,1.5,,P/D 0.93; moderate confidence -- vendor page 403'd, weight from search snippets

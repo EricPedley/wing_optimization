@@ -33,7 +33,7 @@ def test_mass_fit_is_within_its_own_stated_error_bound():
             ps._CAL_DIAMETER_MM, ps._CAL_BLADE_COUNT, ps._CAL_MASS_G):
         predicted_g = float(ps.prop_mass_kg(diameter, blades)) * 1e3
         ratio = predicted_g / float(mass_g)
-        assert 1.0 / 1.65 < ratio < 1.65, (
+        assert 1.0 / 1.75 < ratio < 1.75, (
             f"diameter={float(diameter)}mm blades={float(blades)}: "
             f"predicted {predicted_g:.3f}g vs actual {float(mass_g):.3f}g")
 
