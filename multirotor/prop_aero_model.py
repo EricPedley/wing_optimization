@@ -56,25 +56,38 @@ RHO = 1.225  # kg/m^3, sea level
 # chord ratio match the data" -- it is doing double duty for both, not a
 # clean aerodynamic lift-curve-slope measurement on its own.
 #
-# CL_ALPHA fit jointly against two real bench tests, both static
-# (thrust-stand) throttle sweeps with the low-throttle points dropped as ESC
-# deadband:
-#   prop A: 45mm/3-blade/1.5in pitch, 4.2V, rpm 16,600-43,700
-#   prop B: 50.78mm/3-blade/1.9in pitch, 7.4V, rpm 21,600-47,800
+# CL_ALPHA was originally fit jointly against two real bench tests (45mm and
+# 50.78mm props); see multirotor/calibrate_prop_aero.py for a much larger
+# recalibration attempt against ~300 real bench rows across 18 props (25mm-
+# 101.6mm pitch, 31mm-76.5mm diameter -- see data/tmotor_*.csv) that
+# superseded that original fit, and produced an important negative result
+# worth recording here: NO single CL_ALPHA reconciles this whole dataset,
+# and it is not just noise. Per-prop CL_ALPHA fits (each prop fit against
+# only its own bench data) range from ~1.4 to >50 (several hit the search
+# ceiling, meaning the true per-prop optimum is even more extreme than that)
+# -- values well past any physical airfoil lift-curve slope (~2*pi rad^-1 at
+# most) for the small end, meaning this model's fixed-chord/fixed-Cl_alpha/
+# no-stall/no-Reynolds-effects assumptions genuinely cannot reproduce some
+# props' static thrust curve at ANY CL_ALPHA. The clearest pattern: props at
+# or below ~51mm diameter are structurally unfittable regardless of
+# pitch/diameter ratio (GF1608-3, GF1609-4, GF35mm-3, GF2015-2 all pushed the
+# search past CL_ALPHA=50 with no convergence), which points at low-Reynolds-
+# number blade behavior this model has no term for, not just the
+# chord/Cl_alpha degeneracy the original two-point calibration flagged.
 #
-# A single global CL_ALPHA cannot reconcile both exactly: fit jointly, it
-# systematically UNDER-predicts prop A by ~5-10% and OVER-predicts prop B by
-# ~4-10% -- opposite signs, not just noise. That is a real result, not a
-# fitting failure: it means something this model holds fixed (most likely
-# CHORD_TO_DIAMETER_RATIO, since chord and CL_ALPHA are degenerate -- see
-# above -- but possibly real blades departing from the ideal-twist
-# assumption differently at different pitch/diameter ratios) actually varies
-# between these two prop designs. Treat +-10% as this model's honest
-# uncertainty band on an unseen prop's thrust until a third, differently-
-# proportioned data point either narrows that band or shows it scales with
-# pitch/diameter ratio in a way worth modeling explicitly.
+# Given no honest single global fit exists, CL_ALPHA/INDUCED_POWER_FACTOR
+# below are calibrated against a DELIBERATELY NARROWED subset matching this
+# design's actual candidate range rather than the full dataset: 4 props,
+# 60-77mm diameter, pitch/diameter ratio 0.55-1.05 (Gemfan Hurricane 3018-2,
+# Gemfan GF3028-3, HQProp T3x1.8x3, HQProp T3x2x3 -- 89 bench rows). Within
+# that subset the fit is genuinely good (mean error 0-20% per prop, worst
+# single-row error under 40%) -- but it is explicitly NOT validated outside
+# roughly this diameter/pitch range, and should not be trusted for a design
+# point far outside it (e.g. anything near or below ~51mm diameter) without
+# rerunning calibrate_prop_aero.py against a subset matching THAT range
+# instead.
 CHORD_TO_DIAMETER_RATIO = 0.10
-CL_ALPHA = 4.41   # per radian, joint fit -- see above
+CL_ALPHA = 4.03   # per radian, narrowed-subset fit -- see above
 CD0 = 0.02       # representative profile drag coefficient; NOT independently
                  # fit -- see INDUCED_POWER_FACTOR below for why the bench
                  # data can't cleanly separate the two, and what actually
@@ -88,27 +101,23 @@ CD0 = 0.02       # representative profile drag coefficient; NOT independently
 # power correction factor kappa (>= 1, equivalently 1/FigureOfMerit):
 # actual induced power = kappa * ideal induced power.
 #
-# This was calibrated by backing mechanical torque out of the same two bench
-# tests used for CL_ALPHA (torque = (bench_current - I0) * Kt, using each
-# prop's fitted R/kV from that session, I0 assumed ~0.3A) and comparing to
-# this model's induced-only torque. kappa is NOT constant across the tested
-# throttle range for either prop -- it climbs with rpm, and at low throttle
-# comes out below 1 (physically impossible), which says the low-throttle
-# points are dominated by fit error in R/kV/I0 there, not real physics. At
-# the high-throttle end (80-100%, closest to where this design actually
-# operates, current-limited near max throttle) it is roughly 1.68-2.19 for
-# the 45mm prop and 1.18-1.39 for the 50.78mm prop -- a real and fairly wide
-# spread between the two props (not just noise), averaging to about 1.6.
-# CD0's contribution is degenerate with kappa here (both scale roughly the
-# same way with rpm at fixed geometry, so this data cannot separate a
-# profile-drag mechanism from an induced-loss mechanism), so kappa is
-# carrying essentially the whole non-ideal correction and CD0 is left at its
-# unfit placeholder as a minor secondary term.
-#
-# Treat this the same way as CL_ALPHA's uncertainty band: +-25% or so on
-# power/current predictions until a third prop (ideally with a wider
-# throttle range clean of low-throttle deadband) narrows it.
-INDUCED_POWER_FACTOR = 1.6
+# Refit alongside the CL_ALPHA update above, from the SAME narrowed 4-prop/
+# 89-row subset (60-77mm diameter, P/D 0.55-1.05) -- see calibrate_prop_aero.py
+# and CL_ALPHA's docstring for why a narrowed subset was used instead of the
+# full ~300-row dataset (no honest global fit exists across the full size
+# range). Backs mechanical torque out of each bench row's current via that
+# row's own real motor kV/I0 (data/motor_datasheets.csv; motor_torque's I0
+# subtraction only needs kV/I0, not R, so this did not need per-motor R at
+# all) and fits induced_power_factor by least squares against this model's
+# induced-only torque prediction. Came out at ~0.94 -- notably BELOW 1.0
+# (the ideal-momentum-theory floor a real rotor should never beat), which is
+# almost certainly this fit absorbing some of CL_ALPHA's own residual error
+# in the same direction (the two are not fully separable from static thrust/
+# torque data alone -- see CD0's note below) rather than a real physical
+# result; do not read "kappa < 1" as this design's rotors beating ideal
+# efficiency. Floored implicitly by CD0's fixed value pulling some profile
+# drag out separately, but the two remain degenerate here.
+INDUCED_POWER_FACTOR = 0.94
 
 # Reference rpm the SimITL-style parameterization (see to_simitl_params) is
 # built around. Arbitrary: it cancels out of the resulting parameters
