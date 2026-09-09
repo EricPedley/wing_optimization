@@ -73,6 +73,21 @@ def _prop_geometry(prop_datasheets):
     return by_name
 
 
+# Bench series excluded outright: (throttle-sweep filename, prop label as it
+# appears in that file's "prop" column). Found by cross-checking props of
+# near-identical geometry across independent datasheets -- this one gives
+# MORE thrust at a given rpm than a mechanically similar 3-blade prop
+# (HQ3018, same 76.2mm diameter/1.8in pitch) from a different T-Motor
+# datasheet, backwards from what blade count should do. Either a
+# transcription error on this session's part or a real error on T-Motor's
+# own page (both have happened before in this dataset -- see
+# tmotor_m1103_throttle_sweep.csv's known-bad RPM row) -- not re-verified
+# against the source page, so excluded rather than guessed at.
+EXCLUDED_BENCH_SERIES = {
+    ("tmotor_f1203_throttle_sweep.csv", "G3018-2"),
+}
+
+
 def load_bench_rows():
     with open(DATA_DIR / "prop_datasheets.csv", newline="") as f:
         prop_rows = list(csv.DictReader(f))
@@ -85,6 +100,8 @@ def load_bench_rows():
                 if int(float(r["throttle_pct"])) <= MIN_THROTTLE_PCT:
                     continue
                 prop_label = r["prop"]
+                if (fname, prop_label) in EXCLUDED_BENCH_SERIES:
+                    continue
                 catalogue_name = PROP_NAME_TO_CATALOGUE.get(prop_label)
                 if catalogue_name is None or catalogue_name not in props_by_name:
                     continue

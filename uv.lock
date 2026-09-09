@@ -306,6 +306,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "dash" },
+    { name = "gtsam" },
     { name = "jax" },
     { name = "jaxopt" },
     { name = "modopt", extra = ["jax", "open-source-optimizers"] },
@@ -317,6 +318,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dash", specifier = ">=4.4.1" },
+    { name = "gtsam", specifier = "==4.3a2" },
     { name = "jax", specifier = ">=0.11.0" },
     { name = "jaxopt", specifier = ">=0.8.5" },
     { name = "modopt", extras = ["jax", "open-source-optimizers"], git = "https://github.com/lsdolab/modopt.git?rev=main" },
@@ -392,6 +394,23 @@ wheels = [
 ]
 
 [[package]]
+name = "gtsam"
+version = "4.3a2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pytest" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/78/bc5535fbc29358ec1eeca59be8f248c203fc92f9ce8720c2af3da5a406f4/gtsam-4.3a2-cp313-cp313-macosx_10_15_universal2.whl", hash = "sha256:d678d6a69eea8f3575beec899b9fd825cb385e2916817078b486bf123375dd81", size = 43754774, upload-time = "2026-08-04T19:05:29.468Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/ff/7a62d5a5eebb36fb295d6837c4a9ffa44a87f3f8fd1cc5d96e27141c749d/gtsam-4.3a2-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:8e435b4e385fde110c99bbc568fe153170f35b70922b916480562bf14e36a49b", size = 30987386, upload-time = "2026-08-04T19:05:32.358Z" },
+    { url = "https://files.pythonhosted.org/packages/74/b8/5697a88e556a9821fad09ab193cc4006f23549bd69cfab60379290eecdc3/gtsam-4.3a2-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7dae8a1f99fd040cf667550dfa05bcf8295f01cd0f47cb2bd6082109c725bd0b", size = 32299889, upload-time = "2026-08-04T19:05:35.42Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/53/632dbe60452e1664d6419581282d646820340712ddc0a480ba1cdaba1029/gtsam-4.3a2-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:775c95dfe2d0ab6002292742d1f5beea66803c89c93c06ae3bef119d5039df8b", size = 43775622, upload-time = "2026-08-04T19:05:38.361Z" },
+    { url = "https://files.pythonhosted.org/packages/26/67/fa26deb2c978adfb984d090055ceb8e4ed5f224087742a2cbd9bac9d964c/gtsam-4.3a2-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7e238e3b6a436fea405ab600e0dc918f987d632858fa0a7e650513a85f51ece8", size = 31006010, upload-time = "2026-08-04T19:05:41.192Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/6a/10a41f46cf740886b072b44473e71f8d6862019063d6f4a3f5732c445efb/gtsam-4.3a2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:847b4a057d29ef68601f9c3883c834b27e80cb6c18aacefea3fea4e7713dadfb", size = 32298208, upload-time = "2026-08-04T19:05:43.905Z" },
+]
+
+[[package]]
 name = "h5py"
 version = "3.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -445,6 +464,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a9/01/15bb152d77b21318514a96f43af312635eb2500c96b55398d020c93d86ea/importlib_metadata-9.0.0.tar.gz", hash = "sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc", size = 56405, upload-time = "2026-03-20T06:42:56.999Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/3d/2d244233ac4f76e38533cfcb2991c9eb4c7bf688ae0a036d30725b8faafe/importlib_metadata-9.0.0-py3-none-any.whl", hash = "sha256:2d21d1cc5a017bd0559e36150c21c830ab1dc304dedd1b7ea85d20f45ef3edd7", size = 27789, upload-time = "2026-03-20T06:42:55.665Z" },
+]
+
+[[package]]
+name = "iniconfig"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
 ]
 
 [[package]]
@@ -975,6 +1003,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pluggy"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
 name = "pydantic"
 version = "2.13.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1046,6 +1083,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pygments"
+version = "2.21.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/2e/ced460408999b33da6b31b0021b0f37d329e202d4169aeb164493778f25b/pygments-2.21.0.tar.gz", hash = "sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c", size = 5005329, upload-time = "2026-08-17T08:02:48.824Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9", size = 1250147, upload-time = "2026-08-17T08:02:44.912Z" },
+]
+
+[[package]]
 name = "pyparsing"
 version = "3.3.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1064,6 +1110,22 @@ dependencies = [
     { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3f/bd/c878922e757ddfa25629d6a8880f237c634c2ac777bd8022f2d71b4624bb/pyslsqp-0.1.4.tar.gz", hash = "sha256:989cb560ad28a5e2a09d91a1fd432fb1c835c41c1271bfa2849b564a8ef916ec", size = 1513164, upload-time = "2025-02-07T23:40:48.729Z" }
+
+[[package]]
+name = "pytest"
+version = "9.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
+]
 
 [[package]]
 name = "python-dateutil"

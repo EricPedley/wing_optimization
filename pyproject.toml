@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dash>=4.4.1",
+    "gtsam==4.3a2",
     "jax>=0.11.0",
     "jaxopt>=0.8.5",
     "modopt[jax,open-source-optimizers]",
