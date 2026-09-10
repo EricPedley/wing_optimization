@@ -30,10 +30,13 @@ priors are multiplicative/relative):
               corrections on Kt = Ke = 60/(2*pi*kV), datasheet I0 and R.
               The Kt correction also changes back EMF, preserving equivalent-DC
               energy consistency. Resistance stays positive by construction.
+  global: [log duty_gamma] ESC/throttle exponent shared by all motor rows,
+          so the effective voltage fraction is (throttle_pct/100)^duty_gamma.
 
 Factors:
   thrust (instance + nominal) : T_pred = kT_inst*measured_rpm^p, for every row.
-  motor (instance + motor)    : fixed battery voltage and duty = throttle_pct/100
+  motor (instance + motor + g)  : fixed battery voltage and
+                                  duty = (throttle_pct/100)^duty_gamma
                                 -> closed-form equilibrium RPM and battery current
                                 -> residual on measured RPM and current A only.
   prop instance prior (between) : instance[:2] - nominal[:2] ~ N(0, prop_prior_sigma).
@@ -41,9 +44,12 @@ Factors:
                                   pitch and blade_count heuristics.
   motor prior (unary)           : uniform tight corrections centred on 1.0,
                                   configurable (default Kt 5%, I0 10%, R 20%).
+  duty_gamma prior (unary)      : log(duty_gamma) ~ N(0, 0.1), a single global
+                                  ESC/throttle exponent shared by all motor rows.
 
-No fitted duty or ESC losses. Datasheet resistance conventions, linear throttle
-mapping and constant I0 remain model assumptions. Measurements have independent
+One global latent ESC/throttle exponent duty_gamma is fitted. Datasheet
+resistance conventions and constant I0 remain model assumptions; no other ESC
+losses are modeled. Measurements have independent
 fixed noise scales (5% plus absolute floors), with a row-level Huber kernel.
 These weights include model discrepancy and are not sensor precisions.
 
@@ -192,7 +198,8 @@ def _keys(rows):
             P_mm = r["pitch_m"] * 1000.0 if r["pitch_m"] is not None else None
             prop_specs[n] = (d_mm, P_mm, r["blade_count"])
 
-    return props, motors, pk, ik, mk, pk_dim, ik_dim, prop_specs
+    gkey = symbol("g", 0)
+    return props, motors, pk, ik, mk, pk_dim, ik_dim, prop_specs, gkey
 
 
 def _thrust_factor(ikey, pkey, rpm, thrust_n, sigma_n):
@@ -218,16 +225,19 @@ def _thrust_factor(ikey, pkey, rpm, thrust_n, sigma_n):
     return gtsam.CustomFactor(noise, [ikey, pkey], err)
 
 
-def _motor_factor(ikey, mkey, row, kt_nom, i0_nom, resistance):
+def _motor_factor(ikey, mkey, gkey, row, kt_nom, i0_nom, resistance):
     """Residuals on measured RPM and battery current from the forward model."""
     voltage = row["voltage_v"]
-    duty = row["throttle_pct"] / 100.0
+    throttle = row["throttle_pct"] / 100.0
     measured = np.array([row["rpm"], row["current_a"]])
     sigmas = measured * np.array([RPM_RELATIVE_SIGMA, CURRENT_RELATIVE_SIGMA]) + np.array([100.0, 0.05])
 
     def err(this, values, H=None):
         _, kP = np.exp(values.atVector(ikey))
         kt_scale, i0_scale, r_scale = np.exp(values.atVector(mkey))
+        log_gamma = values.atVector(gkey)[0]
+        duty_gamma = np.exp(log_gamma)
+        duty = throttle ** duty_gamma
         prediction, derivatives = equilibrium_predictions(
             voltage, duty, 1.0, kP, kt_nom * kt_scale, i0_nom * i0_scale,
             resistance * r_scale, jacobian=True)
@@ -235,12 +245,23 @@ def _motor_factor(ikey, mkey, row, kt_nom, i0_nom, resistance):
         if H is not None:
             # instance prop: kT has no effect on RPM/current; only kP matters
             H[0] = np.column_stack((np.zeros(2), derivatives[:2, 1].copy()))
-            H[1] = derivatives[:2, 1:].copy()  # d/d log kt_scale, log i0_scale, log r_scale
+            H[1] = derivatives[:2, 2:].copy()  # d/d log kt_scale, log i0_scale, log r_scale
+            # Finite-difference derivative of RPM/current w.r.t. log(duty_gamma)
+            eps = 1e-5
+            d_plus = throttle ** np.exp(log_gamma + eps)
+            d_minus = throttle ** np.exp(log_gamma - eps)
+            pred_plus = equilibrium_predictions(
+                voltage, d_plus, 1.0, kP, kt_nom * kt_scale, i0_nom * i0_scale,
+                resistance * r_scale)
+            pred_minus = equilibrium_predictions(
+                voltage, d_minus, 1.0, kP, kt_nom * kt_scale, i0_nom * i0_scale,
+                resistance * r_scale)
+            H[2] = ((pred_plus[:2] - pred_minus[:2]) / (2.0 * eps)).reshape(2, 1)
         return residual
     noise = gtsam.noiseModel.Robust.Create(
         gtsam.noiseModel.mEstimator.Huber.Create(1.345),
         gtsam.noiseModel.Diagonal.Sigmas(sigmas))
-    return gtsam.CustomFactor(noise, [ikey, mkey], err)
+    return gtsam.CustomFactor(noise, [ikey, mkey, gkey], err)
 
 
 def _prop_prior_factor(ikey, pkey, sigmas):
@@ -276,13 +297,16 @@ def build_graph(rows, kt_prior_sigma=DEFAULT_KT_PRIOR_SIGMA,
                 i0_prior_sigma=DEFAULT_I0_PRIOR_SIGMA,
                 resistance_prior_sigma=DEFAULT_RESISTANCE_PRIOR_SIGMA,
                 prop_prior_sigma=DEFAULT_PROP_PRIOR_SIGMA):
-    props, motors, pk, ik, mk, pk_dim, ik_dim, prop_specs = _keys(rows)
+    props, motors, pk, ik, mk, pk_dim, ik_dim, prop_specs, gkey = _keys(rows)
     graph = gtsam.NonlinearFactorGraph()
     sig = np.array([kt_prior_sigma, i0_prior_sigma, resistance_prior_sigma])
     if not np.all(np.isfinite(sig) & (sig > 0)):
         raise ValueError("Motor prior sigmas must be positive and finite")
     if not (np.isfinite(prop_prior_sigma) and prop_prior_sigma > 0):
         raise ValueError("prop_prior_sigma must be positive and finite")
+
+    graph.add(gtsam.PriorFactorVector(
+        gkey, np.zeros(1), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.1]))))
 
     for m in motors:
         graph.add(gtsam.PriorFactorVector(
@@ -318,13 +342,15 @@ def build_graph(rows, kt_prior_sigma=DEFAULT_KT_PRIOR_SIGMA,
         if not np.isfinite(duty) or not 0 < duty <= 1:
             raise ValueError("Bench factors require 0 < throttle_pct <= 100")
         kv, i0 = MOTOR_KV_I0[r["motor_key"]]
-        graph.add(_motor_factor(ikey, mk[r["motor_key"]], r,
+        graph.add(_motor_factor(ikey, mk[r["motor_key"]], gkey, r,
                                 KT_NUMERATOR / kv, i0, MOTOR_RESISTANCE[r["motor_key"]]))
-    return graph, props, motors, pk, ik, mk
+    return graph, props, motors, pk, ik, mk, gkey
 
 
-def initial_values(rows, props, motors, pk, ik, mk, pk_dim, ik_dim, prop_specs):
+def initial_values(rows, props, motors, pk, ik, mk, gkey,
+                   pk_dim, ik_dim, prop_specs):
     v = gtsam.Values()
+    v.insert(gkey, np.zeros(1))  # duty_gamma = exp(0) = 1.0
     by_prop = defaultdict(list)
     by_inst = defaultdict(list)
     for r in rows:
@@ -391,21 +417,22 @@ def solve(rows, kt_prior_sigma=DEFAULT_KT_PRIOR_SIGMA,
           i0_prior_sigma=DEFAULT_I0_PRIOR_SIGMA,
           resistance_prior_sigma=DEFAULT_RESISTANCE_PRIOR_SIGMA,
           prop_prior_sigma=DEFAULT_PROP_PRIOR_SIGMA):
-    graph, props, motors, pk, ik, mk = build_graph(
+    graph, props, motors, pk, ik, mk, gkey = build_graph(
         rows, kt_prior_sigma, i0_prior_sigma, resistance_prior_sigma,
         prop_prior_sigma)
-    _, _, _, _, _, pk_dim, ik_dim, prop_specs = _keys(rows)
-    init = initial_values(rows, props, motors, pk, ik, mk, pk_dim, ik_dim, prop_specs)
+    _, _, _, _, _, pk_dim, ik_dim, prop_specs, _ = _keys(rows)
+    init = initial_values(rows, props, motors, pk, ik, mk, gkey,
+                          pk_dim, ik_dim, prop_specs)
     params = gtsam.LevenbergMarquardtParams()
     params.setMaxIterations(300)
     opt = gtsam.LevenbergMarquardtOptimizer(graph, init, params)
     result = opt.optimize()
-    return graph, result, props, motors, pk, ik, mk, init
+    return graph, result, props, motors, pk, ik, mk, gkey, init
 
 
 def main():
     rows = [r for r in load_bench_rows() if r["motor_key"] in MOTOR_KV_I0]
-    graph, res, props, motors, pk, ik, mk, init = solve(rows)
+    graph, res, props, motors, pk, ik, mk, gkey, init = solve(rows)
     dimension = sum(len(res.atVector(k)) for k in res.keys())
     print(f"{len(rows)} bench rows | {len(props)} props | {len(motors)} motors | "
           f"{graph.size()} factors | {dimension} variables")
@@ -437,8 +464,9 @@ def main():
         kt_scale, i0_scale, r_scale = np.exp(res.atVector(mk[r["motor_key"]]))
         kv, i0 = MOTOR_KV_I0[r["motor_key"]]
         kP_inst = np.exp(res.atVector(ikey)[1])
+        duty = (r["throttle_pct"] / 100.0) ** np.exp(res.atVector(gkey)[0])
         pred = equilibrium_predictions(
-            r["voltage_v"], r["throttle_pct"] / 100.0, 1.0, kP_inst,
+            r["voltage_v"], duty, 1.0, kP_inst,
             KT_NUMERATOR / kv * kt_scale, i0 * i0_scale,
             MOTOR_RESISTANCE[r["motor_key"]] * r_scale)
         m_err = pred[:2] / np.array([r["rpm"], r["current_a"]]) - 1.0
@@ -458,6 +486,11 @@ def main():
         print(f"{label:<29}{len(a):>4}{rms[0]:>8.1f}{rms[1]:>11.1f}")
 
     marg = gtsam.Marginals(graph, res)
+
+    gx = res.atVector(gkey)[0]
+    gsig = np.sqrt(marg.marginalCovariance(gkey)[0, 0])
+    print("\n=== global ESC/throttle exponent ===")
+    print(f"duty_gamma = {np.exp(gx):.3f} (log-sigma {gsig:.3f})")
 
     print("=== motors: multiplicative corrections the data wants on the datasheet ===")
     print(f"{'motor':<18}{'Kt x':>9}{'+/-':>7}{'I0 x':>9}{'+/-':>7}"
