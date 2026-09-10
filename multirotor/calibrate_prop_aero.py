@@ -123,6 +123,9 @@ def load_bench_rows():
                     "rpm": float(r["rpm"]),
                     "thrust_g": float(r["thrust_g"]),
                     "current_a": float(r["current_a"]),
+                    "voltage_v": float(r["voltage_v"]),
+                    "throttle_pct": float(r["throttle_pct"]),
+                    "power_w": float(r["power_w"]),
                     "motor_key": key,
                 })
     return rows
