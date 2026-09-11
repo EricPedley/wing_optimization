@@ -1,22 +1,22 @@
-"""Generate hq-51mm-whoop.glb -- a small FPV quadcopter model for pr0p modding.
+"""Generate hq-51mm-micro.glb -- a small FPV quadcopter model for pr0p modding.
 
 Conventions:
   - Units: millimeters (the GLB is exported with mm-scale geometry; scale to
     meters at import if needed, i.e. 0.001).
   - Y up, -Z forward (Unity convention). Camera faces -Z.
-  - Motor centers at (+-42.5, ~5, +-42.5) mm matching
-    ~/.config/unity3d/sigsegowl/pr0p/config/quad/hq-51mm-whoop.json
-    (~120mm wheelbase, true-X).
+  - Motor centers at (+-42.5, ~5, +-28) mm matching
+    ~/.config/unity3d/sigsegowl/pr0p/config/quad/hq-51mm-micro.json
+    (squashed-X: ~102mm diagonal motor-to-motor).
 
 The propeller is extracted from pr0p's Unity assets (vtx-slayer-3
 "Propeller_Baked" mesh in sharedassets0.assets): one blade sector plus the
 hub is kept, mirrored 180 degrees for a 2-blade prop, and scaled to 51mm.
 Requires UnityPy (`uv run --with UnityPy --with trimesh python
-generate_whoop_glb.py`). If the assets or UnityPy are unavailable, a
+generate_micro_glb.py`). If the assets or UnityPy are unavailable, a
 procedural 2-blade prop is generated instead.
 
 Run from anywhere:
-    uv run --with trimesh --with UnityPy python model/generate_whoop_glb.py
+    uv run --with trimesh --with UnityPy python model/generate_micro_glb.py
 """
 
 import os
@@ -26,7 +26,7 @@ import numpy as np
 import trimesh
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_GLB = os.path.join(HERE, "hq-51mm-whoop.glb")
+OUT_GLB = os.path.join(HERE, "hq-51mm-micro.glb")
 PR0P_DATA = os.path.expanduser("~/programs/pr0p/pr0p_Data")
 
 # --- Dimensions (mm) ---------------------------------------------------------
@@ -43,11 +43,14 @@ STANDOFF_X = 10.0     # standoffs at (+-10, *, +-30): ~20x60mm footprint
 STANDOFF_Z = 30.0
 ARM_W = 12.0
 ARM_T = 2.5
-# Motor centers at (+-42.5, +-42.5): plate half-width is 12mm, so this puts
-# each motor exactly arm_length_m() = prop_radius + PROP_TIP_CLEARANCE_M =
-# 30.5mm out from the plate edge -- 51mm prop tips clear the 24mm-wide plate
-# with 5mm to spare. Wheelbase ~= 120mm.
-MOTOR_XZ = 42.5
+# Squashed-X layout: motors at (+-42.5, +-28). The 24mm-wide plate only
+# constrains x -- 42.5 puts each motor exactly arm_length_m() = prop_radius
+# + PROP_TIP_CLEARANCE_M = 30.5mm out from the plate edge. In z the only
+# limit is prop-prop clearance: +-28 gives 56mm front-back separation, i.e.
+# 5mm between 51mm prop disks. Arm reach drops from 60.1mm (true-X at
+# +-42.5/+-42.5) to ~50.9mm.
+MOTOR_X = 42.5
+MOTOR_Z = 28.0
 PROP_DIAM = 51.0
 
 # y levels: bottom plate centered at y=0 (spans -1.25..1.25); arms share the
@@ -291,7 +294,7 @@ FPVCAM_STL = os.path.join(HERE, "fpvcam.stl")
 
 
 def make_camera():
-    """Whoop cam centered vertically between the plates (y ~= 8.75mm) at the
+    """Micro cam centered vertically between the plates (y ~= 8.75mm) at the
     front (-Z) plate edge, tilted up ~27 degrees. Uses fpvcam.stl when
     present (recentred: the STL's origin sits at the top of the body);
     falls back to a box + lens stub."""
@@ -336,14 +339,14 @@ def main():
     motor = make_motor()
     prop = make_prop()
     for i, (sx, sz) in enumerate(motor_dirs, start=1):
-        parts[f"arm{i}"] = make_arm((sx * MOTOR_XZ, sz * MOTOR_XZ))
+        parts[f"arm{i}"] = make_arm((sx * MOTOR_X, sz * MOTOR_Z))
         m = motor.copy()
-        m.apply_translation((sx * MOTOR_XZ, 0, sz * MOTOR_XZ))
+        m.apply_translation((sx * MOTOR_X, 0, sz * MOTOR_Z))
         parts[f"motor{i}"] = m
         p = prop.copy()
         # prop's lowest point sits 0.2mm above the bell top (~flush)
         p.apply_translation(
-            (sx * MOTOR_XZ, PROP_Y - p.bounds[0][1], sz * MOTOR_XZ))
+            (sx * MOTOR_X, PROP_Y - p.bounds[0][1], sz * MOTOR_Z))
         parts[f"prop{i}"] = p
 
     parts["camera"] = make_camera()

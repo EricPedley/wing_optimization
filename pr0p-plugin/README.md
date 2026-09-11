@@ -7,22 +7,34 @@ custom 3D model loaded from a GLB file.
 ## What it does
 
 - Harmony postfix on `QuadConfigLoader.Init()` loads
-  `BepInEx/plugins/hq-51mm-whoop.glb` (path configurable), builds a
+  `BepInEx/plugins/hq-51mm-micro.glb` (path configurable), builds a
   `GameObject` hierarchy, and registers it in
-  `QuadConfigLoader.modelConfigs` under the key `hq-51mm-whoop`.
+  `QuadConfigLoader.modelConfigs` under the key `hq-51mm-micro`.
 - Quad configs whose `"model"` field equals that key get the custom model.
-  `install.sh` patches `config/quad/hq-51mm-whoop.json` accordingly.
+  `install.sh` patches `config/quad/hq-51mm-micro.json` accordingly.
 
 ## Model wiring
 
-The GLB (`model/hq-51mm-whoop.glb`, millimeters, Y-up, -Z forward) is parsed
+The GLB (`model/hq-51mm-micro.glb`, millimeters, Y-up, -Z forward) is parsed
 by a dependency-free importer (`GlbImporter.cs` + `MiniJson.cs`): JSON/BIN
-chunks, accessors, bufferViews, node TRS, glTF→Unity handedness (negate X,
-flip winding). The instantiated root is scaled 0.001 (mm → m).
+chunks, accessors, bufferViews, node TRS, glTF→Unity handedness (negate Z,
+flip winding — this maps the GLB's -Z forward onto Unity's +Z forward).
+The instantiated root is scaled 0.001 (mm → m) and left unrotated.
 
-- `prop1..4` nodes get `Propeller` + `Motor` + a box collider sized to the
-  prop disk. `ModelConfig.motor1..4` point at these (they are the spinning
-  parts). `rotationDir` = -1,1,1,-1 matching `motorNDir` in the quad config.
+- Each `propN` node is re-parented under a `propN_pivot` GO placed at the
+  prop mesh's bounds center (the mesh verts are not centered at the node
+  origin, and `Motor.Update` spins its own transform about local Y — so
+  Motor + Propeller + the prop-disk box collider all live on the pivot).
+- `ModelConfig.motor1..4` are matched to the pivots by comparing pivot
+  positions (root space, post-flip) to the quad config's `motorNPos` —
+  the importer's Z-negation mirrors the GLB, so node order does not line
+  up with physics motor order. `rotationDir` = the matched `motorNDir`.
+- Forward convention: the game faces +Z (donor `vtx-slayer-3`
+  cameraPosition.z > 0; `motor1Pos` z<0 is the rear-right motor,
+  Betaflight order). The importer's Z-negation already makes the model
+  +Z-forward, and the root is left unrotated — `Quad` overwrites
+  `fpvCameraTransform.localRotation` with `Euler(-cameraAngle,0,0)`
+  every frame, so a rotated root would point the FPV camera backwards.
 - All other nodes get box colliders fitted to mesh bounds; every collider
   (incl. the camera sphere) is added to `ModelConfig.colliders`.
 - `cameraPosition` = child transform at the `camera` node bounds center
@@ -39,8 +51,13 @@ flip winding). The instantiated root is scaled 0.001 (mm → m).
   with no NREs.
 - Motor/Propeller components are added while the prop GO is inactive so
   `Motor.OnEnable` (which touches `soundIdle`) can't fire before wiring.
-- The template root is parked at y=-10000 with `DontDestroyOnLoad`;
-  `Quad.LoadQuadModel` `Instantiate`s it under the quad transform.
+- The template root is parented under an *inactive* DontDestroyOnLoad
+  holder at the origin. `Quad.LoadQuadModel`/`QuadPreview.LoadPreview`
+  use `Instantiate(config, parent)` with no position reset, so the
+  template's localPosition is copied into the clone — it must be zero
+  (an earlier y=-10000 parking spot made clones spawn kilometres away
+  and hid the menu preview). The inactive holder hides the template
+  while `activeSelf` stays true, so clones are active under the quad.
 
 ## Install
 
@@ -49,15 +66,15 @@ flip winding). The instantiated root is scaled 0.001 (mm → m).
 cd ~/programs/pr0p && ./run_bepinex.sh ./pr0p.x86_64
 ```
 
-Then select the "HQ 51mm 1S Whoop" quad in-game. Log:
+Then select the "HQ 51mm 1S Micro Freestyle" quad in-game. Log:
 `~/programs/pr0p/BepInEx/LogOutput.log`.
 
 ## Config (BepInEx/config/dev.pr0p.custommodel.cfg)
 
 | Key | Default | Meaning |
 |---|---|---|
-| `GlbPath` | `BepInEx/plugins/hq-51mm-whoop.glb` | GLB to load |
-| `ModelKey` | `hq-51mm-whoop` | modelConfigs dict key |
+| `GlbPath` | `BepInEx/plugins/hq-51mm-micro.glb` | GLB to load |
+| `ModelKey` | `hq-51mm-micro` | modelConfigs dict key |
 | `Scale` | `0.001` | uniform root scale |
 | `DonorModel` | `vtx-slayer-3` | donor modelConfig for materials/audio/effects |
 

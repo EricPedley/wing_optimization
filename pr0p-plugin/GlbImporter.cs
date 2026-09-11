@@ -2,7 +2,10 @@
 // bufferViews, nodes/meshes -> UnityEngine.Mesh. Handles POSITION/NORMAL/
 // TEXCOORD_0 float accessors, u16/u32 indices, node TRS, baseColorFactor
 // and a single embedded PNG baseColorTexture. Converts glTF right-handed
-// coords to Unity left-handed by negating X and flipping winding.
+// coords to Unity left-handed by negating Z and flipping winding — this
+// maps the GLB's -Z forward to Unity's +Z forward, so the imported root
+// needs no rotation (the game stomps the camera anchor's localRotation,
+// so a rotated root would leave the FPV camera facing backwards).
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -78,7 +81,9 @@ namespace Pr0pCustomModel
             var go = new GameObject(MiniJson.GetStr(node, "name") ?? $"node{idx}");
             go.transform.SetParent(parent, false);
 
-            // TRS (glTF -> Unity: negate x pos, negate y/z rot parts)
+            // TRS (glTF -> Unity: negate z pos, negate x/y rot parts —
+            // conjugating a rotation by the diag(1,1,-1) mirror maps
+            // q=(x,y,z,w) to (-x,-y,z,w))
             var t = MiniJson.GetArr(node, "translation");
             var r = MiniJson.GetArr(node, "rotation");
             var s = MiniJson.GetArr(node, "scale");
@@ -89,7 +94,7 @@ namespace Pr0pCustomModel
                 var M = new Matrix4x4();
                 for (int c = 0; c < 16; c++)
                     M[c] = (float)MiniJson.Num(m[c]);
-                var flip = Matrix4x4.Scale(new Vector3(-1, 1, 1));
+                var flip = Matrix4x4.Scale(new Vector3(1, 1, -1));
                 M = flip * M * flip;
                 go.transform.localPosition = M.GetColumn(3);
                 go.transform.localRotation = M.rotation;
@@ -98,14 +103,14 @@ namespace Pr0pCustomModel
             else
             {
                 go.transform.localPosition = t != null
-                    ? new Vector3(-(float)MiniJson.Num(t[0]),
+                    ? new Vector3((float)MiniJson.Num(t[0]),
                                   (float)MiniJson.Num(t[1]),
-                                  (float)MiniJson.Num(t[2]))
+                                  -(float)MiniJson.Num(t[2]))
                     : Vector3.zero;
                 go.transform.localRotation = r != null
-                    ? new Quaternion((float)MiniJson.Num(r[0]),
+                    ? new Quaternion(-(float)MiniJson.Num(r[0]),
                                      -(float)MiniJson.Num(r[1]),
-                                     -(float)MiniJson.Num(r[2]),
+                                     (float)MiniJson.Num(r[2]),
                                      (float)MiniJson.Num(r[3]))
                     : Quaternion.identity;
                 go.transform.localScale = s != null
@@ -119,7 +124,8 @@ namespace Pr0pCustomModel
 
             if (node.TryGetValue("mesh", out var meshObj))
             {
-                var meshDef = MiniJson.Obj(meshObj);
+                var meshes = MiniJson.GetArr(gltf, "meshes");
+                var meshDef = MiniJson.Obj(meshes[MiniJson.Int(meshObj)]);
                 var prims = MiniJson.GetArr(meshDef, "primitives");
                 if (prims.Count == 1)
                 {
@@ -169,8 +175,8 @@ namespace Pr0pCustomModel
             float[] pos = ReadFloats(posAcc);
             var verts = new Vector3[vcount];
             for (int i = 0; i < vcount; i++)
-                verts[i] = new Vector3(-pos[3 * i], pos[3 * i + 1],
-                                       pos[3 * i + 2]);
+                verts[i] = new Vector3(pos[3 * i], pos[3 * i + 1],
+                                       -pos[3 * i + 2]);
             mesh.vertices = verts;
 
             if (attrs.TryGetValue("NORMAL", out var nrm))
@@ -180,8 +186,8 @@ namespace Pr0pCustomModel
                 float[] n = ReadFloats(nAcc);
                 var norms = new Vector3[vcount];
                 for (int i = 0; i < vcount; i++)
-                    norms[i] = new Vector3(-n[3 * i], n[3 * i + 1],
-                                           n[3 * i + 2]);
+                    norms[i] = new Vector3(n[3 * i], n[3 * i + 1],
+                                           -n[3 * i + 2]);
                 mesh.normals = norms;
             }
             if (attrs.TryGetValue("TEXCOORD_0", out var uv))
@@ -239,17 +245,31 @@ namespace Pr0pCustomModel
                 for (int c = 0; c < comps; c++)
                 {
                     int o = off + i * stride + c * CompSize(ct);
-                    outp[i * comps + c] = ct == 5126
-                        ? BitConverter.ToSingle(bin, o)
-                        : ct == 5123
-                            ? BitConverter.ToUInt16(bin, o)
-                            : ct == 5125
-                                ? BitConverter.ToUInt32(bin, o)
-                                : ct == 5121 ? bin[o]
-                                : ct == 5120 ? (sbyte)bin[o]
-                                : (short)BitConverter.ToUInt16(bin, o);
+                    // corlib is trimmed: no ToSingle/ToUInt16 — decode manually
+                    float v;
+                    if (ct == 5126)
+                        v = new I2F { i = BitConverter.ToInt32(bin, o) }.f;
+                    else if (ct == 5123)
+                        v = bin[o] | (bin[o + 1] << 8);
+                    else if (ct == 5125)
+                        v = BitConverter.ToUInt32(bin, o);
+                    else if (ct == 5121)
+                        v = bin[o];
+                    else if (ct == 5120)
+                        v = (sbyte)bin[o];
+                    else
+                        v = (short)(bin[o] | (bin[o + 1] << 8));
+                    outp[i * comps + c] = v;
                 }
             return outp;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(
+            System.Runtime.InteropServices.LayoutKind.Explicit)]
+        struct I2F
+        {
+            [System.Runtime.InteropServices.FieldOffset(0)] public int i;
+            [System.Runtime.InteropServices.FieldOffset(0)] public float f;
         }
 
         int[] ReadIndices(Dictionary<string, object> acc)
@@ -269,7 +289,7 @@ namespace Pr0pCustomModel
                 outp[i] = ct == 5125
                     ? (int)BitConverter.ToUInt32(bin, o)
                     : ct == 5123
-                        ? BitConverter.ToUInt16(bin, o)
+                        ? bin[o] | (bin[o + 1] << 8)
                         : bin[o];
             }
             return outp;

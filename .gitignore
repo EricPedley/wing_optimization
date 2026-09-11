@@ -5,3 +5,5 @@ __pycache__
 .onshape_keys.json
 pr0p-plugin/bin/
 pr0p-plugin/obj/
+pr0p-plugin/patcher/bin/
+pr0p-plugin/patcher/obj/
