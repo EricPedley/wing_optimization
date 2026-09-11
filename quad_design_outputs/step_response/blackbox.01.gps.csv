@@ -1,0 +1,2 @@
+time (us), GPS_numSat, GPS_coord[0], GPS_coord[1], GPS_altitude, GPS_speed (m/s), GPS_ground_course
+8126875, 10, 48.4208769, 10.7112636, 20, 0.12, 0.0

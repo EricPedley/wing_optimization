@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx creator="Blackbox flight data recorder" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">
+<metadata><name>Blackbox flight log</name></metadata>
+<trk><name>Blackbox flight log</name><trkseg>
+  <trkpt lat="48.4208769" lon="10.7112636"><ele>2.00</ele><time>0000-01-01T00:00:08.126875Z</time></trkpt>
+</trkseg></trk>
+</gpx>
