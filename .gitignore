@@ -3,3 +3,5 @@ __pycache__
 # Onshape API keys live in ~/.onshape_keys.json, not here.  Kept as a backstop
 # in case a copy is ever dropped in the working tree by accident.
 .onshape_keys.json
+pr0p-plugin/bin/
+pr0p-plugin/obj/

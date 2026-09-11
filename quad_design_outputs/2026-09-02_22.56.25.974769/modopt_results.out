@@ -1,0 +1,26 @@
+
+	Solution from Scipy SLSQP:
+	----------------------------------------------------------------------------------------------------
+	Problem                  : quad_design
+	Solver                   : scipy-slsqp
+	Success                  : True
+	Message                  : Optimization terminated successfully
+	Status                   : 0
+	Total time               : 0.012614250183105469
+	Objective                : -8.203847706322419
+	Gradient norm            : 430.6777184752571
+	Total function evals     : 23
+	Total gradient evals     : 17
+	Major iterations         : 17
+	Total callbacks          : 81
+	Reused callbacks         : 0
+	obj callbacks            : 23
+	grad callbacks           : 17
+	hess callbacks           : 0
+	con callbacks            : 24
+	jac callbacks            : 17
+	Optimal variables        : [2.32551522e+04 2.80763650e+02 4.29645270e-02 2.00000000e+00
+ 3.52740197e-02]
+	Optimal obj. gradient    : [-6.38658646e-04 -4.58998511e-03 -3.80257103e+02 -1.97864257e+00
+ -2.02197719e+02]
+	----------------------------------------------------------------------------------------------------

@@ -26,7 +26,7 @@ import multirotor.battery_model as bm
 import multirotor.frame_scaling as fs
 import multirotor.motor_model as mm
 import multirotor.motor_scaling as ms
-import multirotor.prop_aero_model as pa
+import multirotor.prop_factor_graph_model as pa
 import multirotor.prop_scaling as ps
 
 G = 9.81  # m/s^2
@@ -37,6 +37,16 @@ G = 9.81  # m/s^2
 # before trusting the current constraint close to its limit.
 VBAT = 3.7
 ESC_MAX_CURRENT_A = 12.0
+
+# ESC throttle exponent from the prop_factor_graph.py bench calibration.
+# Effective voltage applied to the motor is VBAT * throttle_frac^DUTY_GAMMA
+# rather than the naive throttle_frac * VBAT.  Fitted value ~0.79.
+DUTY_GAMMA = 0.789
+
+
+def effective_voltage(vbat, throttle_frac):
+    """Effective DC link voltage after the ESC's throttle mapping."""
+    return vbat * (throttle_frac ** DUTY_GAMMA)
 
 # Smallest stator size with a datasheet showing it can take the ESC's ~50W
 # burst (see conversation) -- used as a hard floor instead of a thermal
@@ -199,7 +209,8 @@ def evaluate(x, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MASS_KG,
     twr = 4.0 * full_throttle["thrust_n"] / jnp.maximum(weight_n, 1e-9)
 
     spin_up_s = mm.spin_up_time_s(
-        SPIN_UP_START_FRAC * vbat, SPIN_UP_END_FRAC * vbat, vel,
+        effective_voltage(vbat, SPIN_UP_START_FRAC),
+        effective_voltage(vbat, SPIN_UP_END_FRAC), vel,
         g["kv"], unit["resistance"], unit["i0"], unit["prop_a_factor"],
         unit["prop_torque_factor"], unit["prop_max_rpm"],
         unit["thrust_factor_x"], unit["thrust_factor_y"],
@@ -234,8 +245,9 @@ def current_at_throttle_a(x, throttle_frac, vel=0.0, vbat=VBAT, other_mass_kg=OT
     unit = motor_prop_unit(g["kv"], g["stator_volume_mm3"], g["prop_diameter_m"],
                             g["blade_count"], g["pitch_m"], chord_to_diameter_ratio,
                             cl_alpha, cd0, induced_power_factor)
-    r = mm.equilibrium(throttle_frac * vbat, vel, g["kv"], unit["resistance"], unit["i0"],
-                        PLACEHOLDER_MOTOR_RTH, unit["prop_a_factor"], unit["prop_torque_factor"],
+    r = mm.equilibrium(effective_voltage(vbat, throttle_frac), vel, g["kv"],
+                        unit["resistance"], unit["i0"], PLACEHOLDER_MOTOR_RTH,
+                        unit["prop_a_factor"], unit["prop_torque_factor"],
                         unit["prop_max_rpm"], unit["thrust_factor_x"], unit["thrust_factor_y"],
                         unit["thrust_factor_z"])
     return r["current_a"]
@@ -258,7 +270,7 @@ def throttle_sweep(x, throttle_fracs, vel=0.0, vbat=VBAT, other_mass_kg=OTHER_MA
                             cl_alpha, cd0, induced_power_factor)
 
     def at_throttle(frac):
-        volts = frac * vbat
+        volts = effective_voltage(vbat, frac)
         r = mm.equilibrium(volts, vel, g["kv"], unit["resistance"], unit["i0"],
                             PLACEHOLDER_MOTOR_RTH, unit["prop_a_factor"],
                             unit["prop_torque_factor"], unit["prop_max_rpm"],
@@ -356,7 +368,7 @@ def _hover_throttle_frac(vbat_now, thrust_needed_per_motor, vel, kv, resistance,
                           cl_alpha, cd0, induced_power_factor):
     """Throttle fraction (of vbat_now) at which one motor/prop's thrust
     equals thrust_needed_per_motor, by Newton's method on
-    f(frac) = thrust(frac * vbat_now) - thrust_needed_per_motor.
+    f(frac) = thrust(effective_voltage(vbat_now, frac)) - thrust_needed_per_motor.
 
     thrust(volts) is a closed-form composition of two quadratic solves
     (steady_state_rpm, then bemt_thrust_torque) -- smooth and, on the
@@ -379,7 +391,7 @@ def _hover_throttle_frac(vbat_now, thrust_needed_per_motor, vel, kv, resistance,
                                       induced_power_factor)[0]
 
     def f(frac):
-        return thrust_at(frac * vbat_now) - thrust_needed_per_motor
+        return thrust_at(effective_voltage(vbat_now, frac)) - thrust_needed_per_motor
 
     df = jax.grad(f)
 
@@ -414,7 +426,7 @@ def _hover_point_jit(vel, other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
 
     def current_at(vbat_now, frac):
         hover = mm.equilibrium(
-            frac * vbat_now, vel, kv, unit["resistance"], unit["i0"],
+            effective_voltage(vbat_now, frac), vel, kv, unit["resistance"], unit["i0"],
             PLACEHOLDER_MOTOR_RTH, unit["prop_a_factor"], unit["prop_torque_factor"],
             unit["prop_max_rpm"], unit["thrust_factor_x"], unit["thrust_factor_y"],
             unit["thrust_factor_z"])
@@ -646,7 +658,8 @@ def _prop_only_cost(prop_x, kv, resistance, i0, other_mass_kg, motor_mass, vel, 
     twr = 4.0 * full_throttle["thrust_n"] / jnp.maximum(weight_n, 1e-9)
 
     spin_up_s = mm.spin_up_time_s(
-        SPIN_UP_START_FRAC * vbat, SPIN_UP_END_FRAC * vbat, vel, kv, resistance, i0,
+        effective_voltage(vbat, SPIN_UP_START_FRAC),
+        effective_voltage(vbat, SPIN_UP_END_FRAC), vel, kv, resistance, i0,
         aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
         aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"],
         prop_inertia)
@@ -738,6 +751,59 @@ def _optimize_prop_for_motor(kv, resistance, i0, motor_mass, vel, vbat, other_ma
     return best_x, best_cost
 
 
+def _throttle_limited_operating_point(kv, resistance, i0, aero, prop_inertia,
+                                       vbat, vel, esc_max=ESC_MAX_CURRENT_A,
+                                       n_bisect=30):
+    """Return the steady-state operating point with a software throttle cap.
+
+    If full-throttle current is below esc_max, returns the true full-throttle
+    point and t_lim=1.0.  Otherwise bisects the throttle fraction until the
+    per-motor current is exactly esc_max, and returns the point at that
+    voltage.  Spin-up time is recomputed as the 10% -> 90% of the *capped*
+    max throttle (so a bigger prop that needs limiting is penalized less on
+    spin-up, since it only has to reach the capped rpm).
+    """
+    full = mm.equilibrium(
+        vbat, vel, kv, resistance, i0, PLACEHOLDER_MOTOR_RTH,
+        aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
+        aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
+    full_current = float(full["current_a"])
+
+    if full_current <= esc_max + 1e-9:
+        t_lim = 1.0
+        limited = full
+    else:
+        lo, hi = 0.0, 1.0
+        for _ in range(n_bisect):
+            mid = 0.5 * (lo + hi)
+            mid_throttle = effective_voltage(vbat, mid)
+            r = mm.equilibrium(
+                mid_throttle, vel, kv, resistance, i0, PLACEHOLDER_MOTOR_RTH,
+                aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
+                aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
+            if float(r["current_a"]) > esc_max:
+                hi = mid
+            else:
+                lo = mid
+        t_lim = 0.5 * (lo + hi)
+        limited = mm.equilibrium(
+            effective_voltage(vbat, t_lim), vel, kv, resistance, i0, PLACEHOLDER_MOTOR_RTH,
+            aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
+            aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
+
+    # Spin-up is evaluated from 10% to 90% of the capped max throttle.
+    spin_end_frac = SPIN_UP_END_FRAC * t_lim
+    spin_end_frac = max(spin_end_frac, SPIN_UP_START_FRAC + 1e-3)
+    spin_up_s = mm.spin_up_time_s(
+        effective_voltage(vbat, SPIN_UP_START_FRAC),
+        effective_voltage(vbat, spin_end_frac), vel,
+        kv, resistance, i0, aero["prop_a_factor"], aero["prop_torque_factor"],
+        aero["prop_max_rpm"], aero["thrust_factor_x"], aero["thrust_factor_y"],
+        aero["thrust_factor_z"], prop_inertia)
+
+    return limited, spin_up_s, t_lim
+
+
 def _evaluate_motor_with_prop(c, prop_diameter_m, blade_count, pitch_m, vel, vbat,
                                other_mass_kg, chord_to_diameter_ratio, cl_alpha, cd0,
                                induced_power_factor, prop_mass_kg_override=None):
@@ -749,6 +815,11 @@ def _evaluate_motor_with_prop(c, prop_diameter_m, blade_count, pitch_m, vel, vba
     prop_scaling.nearest_catalogue_prop) -- used when the prop itself is also
     a real catalogue part, not just an idealized (diameter, pitch,
     blade_count) point.
+
+    Real motor/prop pairs are allowed to hit the ESC current cap; if they do,
+    this routine applies a software throttle limit so the reported full-throttle
+    thrust, current, spin-up and tip Mach are all at the capped operating point,
+    while hover (and therefore hover efficiency) is unchanged.
     """
     motor_mass = c["mass_g"] * 1e-3
     resistance = c["resistance_ohm"]
@@ -766,25 +837,19 @@ def _evaluate_motor_with_prop(c, prop_diameter_m, blade_count, pitch_m, vel, vba
     total_mass = other_mass_kg + frame_mass + 4.0 * (motor_mass + prop_mass)
     weight_n = total_mass * G
 
-    full_throttle = mm.equilibrium(
-        vbat, vel, c["kv_rpm_per_v"], resistance, i0, PLACEHOLDER_MOTOR_RTH,
-        aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
-        aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
+    limited, spin_up_s, t_lim = _throttle_limited_operating_point(
+        c["kv_rpm_per_v"], resistance, i0, aero, prop_inertia, vbat, vel)
 
-    twr = 4.0 * full_throttle["thrust_n"] / jnp.maximum(weight_n, 1e-9)
-    spin_up_s = mm.spin_up_time_s(
-        SPIN_UP_START_FRAC * vbat, SPIN_UP_END_FRAC * vbat, vel,
-        c["kv_rpm_per_v"], resistance, i0, aero["prop_a_factor"],
-        aero["prop_torque_factor"], aero["prop_max_rpm"], aero["thrust_factor_x"],
-        aero["thrust_factor_y"], aero["thrust_factor_z"], prop_inertia)
-    tip_speed_m_s = jnp.pi * prop_diameter_m * full_throttle["rpm"] / 60.0
+    twr = 4.0 * limited["thrust_n"] / jnp.maximum(weight_n, 1e-9)
+    tip_speed_m_s = jnp.pi * prop_diameter_m * limited["rpm"] / 60.0
     tip_mach = tip_speed_m_s / SPEED_OF_SOUND_M_S
 
     return dict(
         motor=c, motor_mass=motor_mass, prop_mass=prop_mass, frame_mass=frame_mass,
         prop_diameter_m=prop_diameter_m, blade_count=blade_count, pitch_m=pitch_m,
         total_mass=total_mass, weight_n=weight_n, twr=twr,
-        spin_up_s=spin_up_s, tip_mach=tip_mach, **full_throttle)
+        spin_up_s=spin_up_s, tip_mach=tip_mach, throttle_limit=t_lim,
+        **limited)
 
 
 def _default_prop_cost(result, min_twr=None):

@@ -32,14 +32,13 @@ jax.config.update("jax_enable_x64", True)
 
 # --- Constants -----------------------------------------------------------
 #
-# The motor-constant relation Kt[N.m/A] = 8.3 / kV[rpm/V] is SimITL's own
-# approximation (see physics.cpp's motorCurrent/motorTorque, which cite
-# https://things-in-motion.blogspot.com/2018/12/how-to-estimate-torque-of-bldc-pmsm.html).
-# The textbook constant relating torque and speed constants under SI units
-# would be 60/(2*pi) = 9.5493; SimITL's 8.3 is close to that derated by a
-# typical BLDC efficiency, and is kept here unchanged so this model reproduces
-# SimITL rather than a more "correct" but different simulator.
-KT_NUMERATOR = 8.3  # N.m per A per (1/kV), i.e. Kt = KT_NUMERATOR / kV
+# The motor-constant relation Kt[N.m/A] = 60/(2*pi) / kV[rpm/V] is the
+# textbook SI value.  The prop_factor_graph.py bench calibration uses this
+# value and fits multiplicative kt_scale corrections per motor; the resulting
+# corrections stay close to 1.0, so the SI constant is a better default for
+# design work than SimITL's 8.3 approximation.  motor_scaling.py recalibrates
+# its Km fit from the same motor datasheets using whichever value is here.
+KT_NUMERATOR = 60.0 / (2.0 * jnp.pi)  # N.m per A per (1/kV)
 
 # Smooths the sign() in the friction term (see motor_torque) into a
 # differentiable function of rpm.  SimITL switches branches at |rpm| < 1;

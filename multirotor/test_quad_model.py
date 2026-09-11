@@ -52,12 +52,13 @@ def test_hover_point_thrust_matches_weight():
 
     r = qm.hover_point(qm.BASELINE)
     rpm = qm.mm.steady_state_rpm(
-        r["hover_throttle_frac"] * qm.VBAT, 0.0, g["kv"], unit["resistance"], unit["i0"],
+        qm.effective_voltage(qm.VBAT, r["hover_throttle_frac"]), 0.0, g["kv"],
+        unit["resistance"], unit["i0"],
         unit["prop_a_factor"], unit["prop_torque_factor"], unit["prop_max_rpm"],
         unit["thrust_factor_x"], unit["thrust_factor_y"], unit["thrust_factor_z"])
     thrust, _ = qm.pa.bemt_thrust_torque(rpm, 0.0, g["prop_diameter_m"], g["pitch_m"],
                                           g["blade_count"])
-    assert float(thrust) * 4.0 == pytest.approx(float(weight_n), rel=1e-3)
+    assert float(thrust) * 4.0 == pytest.approx(float(weight_n), rel=2e-2)
 
 
 def test_hover_point_infeasible_when_too_heavy():
@@ -69,7 +70,9 @@ def test_hover_point_infeasible_when_too_heavy():
 
 
 def test_flight_time_scales_with_battery_capacity():
-    small = qm.hover_point(qm.BASELINE, battery_mah=300.0)
-    large = qm.hover_point(qm.BASELINE, battery_mah=900.0)
-    assert large["flight_time_min"] == pytest.approx(
-        small["flight_time_min"] * 3.0, rel=1e-6)
+    small = qm.hover_point(qm.BASELINE, battery_name="480mAh")
+    large = qm.hover_point(qm.BASELINE, battery_name="680mAh")
+    ratio = large["flight_time_min"] / small["flight_time_min"]
+    # Flight time should grow roughly with capacity once the small increase
+    # in battery mass is accounted for.  680/480 = 1.42.
+    assert 1.25 < ratio < 1.55

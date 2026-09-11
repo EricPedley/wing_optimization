@@ -1,0 +1,26 @@
+
+	Solution from Scipy SLSQP:
+	----------------------------------------------------------------------------------------------------
+	Problem                  : quad_design
+	Solver                   : scipy-slsqp
+	Success                  : False
+	Message                  : Positive directional derivative for linesearch
+	Status                   : 8
+	Total time               : 0.03387284278869629
+	Objective                : -8.504343822915732
+	Gradient norm            : 330.43028405607856
+	Total function evals     : 55
+	Total gradient evals     : 42
+	Major iterations         : 46
+	Total callbacks          : 195
+	Reused callbacks         : 0
+	obj callbacks            : 55
+	grad callbacks           : 42
+	hess callbacks           : 0
+	con callbacks            : 56
+	jac callbacks            : 42
+	Optimal variables        : [1.60522904e+04 4.15128869e+02 5.34814937e-02 2.00000000e+00
+ 4.58602577e-02]
+	Optimal obj. gradient    : [-9.38920908e-04 -2.99880039e-03 -2.95616348e+02 -1.85187196e+00
+ -1.47620182e+02]
+	----------------------------------------------------------------------------------------------------

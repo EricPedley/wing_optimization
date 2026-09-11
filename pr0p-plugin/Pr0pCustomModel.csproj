@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>Pr0pCustomModel</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Pr0pDir Condition="'$(Pr0pDir)'==''">$(HOME)/programs/pr0p</Pr0pDir>
+    <BepInExDir Condition="'$(BepInExDir)'==''">/tmp/be5/BepInEx/core</BepInExDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="$(Pr0pDir)/pr0p_Data/Managed/Pr0Drone.dll" />
+    <Reference Include="$(Pr0pDir)/pr0p_Data/Managed/UnityEngine.dll" />
+    <Reference Include="$(Pr0pDir)/pr0p_Data/Managed/UnityEngine.CoreModule.dll" />
+    <Reference Include="$(Pr0pDir)/pr0p_Data/Managed/UnityEngine.PhysicsModule.dll" />
+    <Reference Include="$(Pr0pDir)/pr0p_Data/Managed/UnityEngine.AudioModule.dll" />
+    <Reference Include="$(Pr0pDir)/pr0p_Data/Managed/UnityEngine.ParticleSystemModule.dll" />
+    <Reference Include="$(Pr0pDir)/pr0p_Data/Managed/UnityEngine.ImageConversionModule.dll" />
+    <Reference Include="$(BepInExDir)/0Harmony.dll" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net472" Version="1.0.3" />
+  </ItemGroup>
+</Project>

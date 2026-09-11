@@ -100,7 +100,7 @@ def hover_power_w(x, vel=0.0, battery_name=BATTERY_NAME,
         g["prop_diameter_m"], g["blade_count"], g["pitch_m"], battery_mass_kg,
         capacity_mah, r_int)
     vbat0 = bm.terminal_voltage(0.0, 0.0, r_int)  # OCV at full charge, matches _hover_point_jit
-    hover_voltage = r["hover_frac0"] * vbat0
+    hover_voltage = qm.effective_voltage(vbat0, r["hover_frac0"])
     return r["current0"] * hover_voltage
 
 
@@ -284,11 +284,11 @@ def _prop_only_efficiency_cost(prop_x, kv, resistance, i0, other_mass_kg, motor_
         aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"],
         diameter_m, pitch_m, blade_count, chord_to_diameter_ratio, cl_alpha, cd0,
         induced_power_factor)
+    hover_voltage = qm.effective_voltage(vbat0, hover_frac)
     hover = qm.mm.equilibrium(
-        hover_frac * vbat0, vel, kv, resistance, i0, qm.PLACEHOLDER_MOTOR_RTH,
+        hover_voltage, vel, kv, resistance, i0, qm.PLACEHOLDER_MOTOR_RTH,
         aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
         aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
-    hover_voltage = hover_frac * vbat0
     hover_power_total = 4.0 * hover["current_a"] * hover_voltage
 
     full_throttle = qm.mm.equilibrium(
@@ -297,7 +297,8 @@ def _prop_only_efficiency_cost(prop_x, kv, resistance, i0, other_mass_kg, motor_
         aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
     twr = 4.0 * full_throttle["thrust_n"] / jnp.maximum(weight_n, 1e-9)
     spin_up_s = qm.mm.spin_up_time_s(
-        qm.SPIN_UP_START_FRAC * vbat, qm.SPIN_UP_END_FRAC * vbat, vel, kv, resistance, i0,
+        qm.effective_voltage(vbat, qm.SPIN_UP_START_FRAC),
+        qm.effective_voltage(vbat, qm.SPIN_UP_END_FRAC), vel, kv, resistance, i0,
         aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
         aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"],
         prop_inertia)
@@ -354,11 +355,11 @@ def _result_efficiency_cost(result, min_twr=MIN_TWR, battery_name=BATTERY_NAME,
         result["prop_diameter_m"], result["pitch_m"], result["blade_count"],
         qm.pa.CHORD_TO_DIAMETER_RATIO, qm.pa.CL_ALPHA, qm.pa.CD0,
         qm.pa.INDUCED_POWER_FACTOR)
+    hover_voltage = qm.effective_voltage(vbat0, hover_frac)
     hover = qm.mm.equilibrium(
-        hover_frac * vbat0, 0.0, m["kv_rpm_per_v"], resistance, i0, qm.PLACEHOLDER_MOTOR_RTH,
+        hover_voltage, 0.0, m["kv_rpm_per_v"], resistance, i0, qm.PLACEHOLDER_MOTOR_RTH,
         aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
         aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
-    hover_voltage = float(hover_frac) * vbat0
     hover_power_total = float(4.0 * hover["current_a"]) * hover_voltage
 
     def penalty(shortfall, scale):
@@ -433,8 +434,9 @@ def _result_hover_point(result, battery_name=BATTERY_NAME, other_mass_kg=qm.OTHE
         result["prop_diameter_m"], result["pitch_m"], result["blade_count"],
         qm.pa.CHORD_TO_DIAMETER_RATIO, qm.pa.CL_ALPHA, qm.pa.CD0,
         qm.pa.INDUCED_POWER_FACTOR)
+    hover_voltage = qm.effective_voltage(vbat0, hover_frac)
     hover = qm.mm.equilibrium(
-        hover_frac * vbat0, 0.0, m["kv_rpm_per_v"], resistance, i0, qm.PLACEHOLDER_MOTOR_RTH,
+        hover_voltage, 0.0, m["kv_rpm_per_v"], resistance, i0, qm.PLACEHOLDER_MOTOR_RTH,
         aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
         aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
     current0 = float(4.0 * hover["current_a"])
@@ -480,8 +482,9 @@ def _discharge_with_real_motor(m, prop_diameter_m, pitch_m, blade_count,
             qm.pa.CL_ALPHA, qm.pa.CD0, qm.pa.INDUCED_POWER_FACTOR)
 
     def current_at(vbat_now, frac):
+        hover_voltage = qm.effective_voltage(vbat_now, frac)
         hover = qm.mm.equilibrium(
-            frac * vbat_now, 0.0, kv, resistance, i0, qm.PLACEHOLDER_MOTOR_RTH,
+            hover_voltage, 0.0, kv, resistance, i0, qm.PLACEHOLDER_MOTOR_RTH,
             aero["prop_a_factor"], aero["prop_torque_factor"], aero["prop_max_rpm"],
             aero["thrust_factor_x"], aero["thrust_factor_y"], aero["thrust_factor_z"])
         return 4.0 * hover["current_a"]
@@ -551,7 +554,8 @@ def _print_realized_report(realized):
     hover = _result_hover_point(best, battery_name=BATTERY_NAME, other_mass_kg=qm.OTHER_MASS_KG)
     r_int = bm.r_int_ohm(BATTERY_NAME)
     vbat0 = bm.terminal_voltage(0.0, 0.0, r_int)
-    hover_power_total = hover["hover_current_a_total"] * hover["hover_throttle_frac"] * vbat0
+    hover_power_total = (hover["hover_current_a_total"]
+                         * qm.effective_voltage(vbat0, hover["hover_throttle_frac"]))
 
     print(f"\n  {'quantity':<32}{'value':>12}")
     rows = [
@@ -624,7 +628,8 @@ def _catalogue_combos(query_diameter_mm=50.0, query_pitch_mm=40.0, query_blade_c
                 continue
 
             hover = _result_hover_point(res, battery_name=battery_name, other_mass_kg=other_mass_kg)
-            hover_power_w = hover["hover_current_a_total"] * hover["hover_throttle_frac"] * vbat0
+            hover_power_w = (hover["hover_current_a_total"]
+                             * qm.effective_voltage(vbat0, hover["hover_throttle_frac"]))
 
             combos.append({
                 "motor": c["name"], "prop": p["name"], "diameter_mm": p["diameter_mm"],
