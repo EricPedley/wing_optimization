@@ -7,7 +7,7 @@ Two halves:
    simitl-playback's ghost mode replays rcData verbatim after the 8s boot +
    0.1s arm sequence, so this is a rate-setpoint step response.
 
-   Run:   simitl-playback g ghost.json --config config/quad/hq-51mm-whoop.json -ff -no
+   Run:   simitl-playback g ghost.json --config config/quad/hq-51mm-micro.json -ff -no
    from tools/simitl-playback/, producing quadstate.csv.
 
 2. `plot(csv_path)` reads quadstate.csv and plots commanded rate
@@ -29,12 +29,17 @@ import numpy as np
 
 
 def write_ghost(path, hover_rc=-0.155, axis=0, step_value=0.5,
-                hover_sec=2.0, step_sec=0.8, settle_sec=1.2):
+                hover_sec=2.0, step_sec=0.8, settle_sec=1.2,
+                rc_rate_hz=None, ramp_ms=0.0):
     """ghost.json: hover, then step `axis` (rcData index) by step_value.
 
     rcData channels: 0=roll, 1=pitch, 2=throttle, 3=yaw, 4=arm.
     simitl-playback forces arm-on + throttle-low during its own arming
     window, and replays these rc values verbatim afterwards.
+
+    rc_rate_hz: if set, emit a sample every 1/rate seconds (held between
+    samples by the player) -- models a real RC link's discrete packets so
+    BF's own rc smoothing/interpolation sees realistic input.
     """
     def rc(roll=0.0, pitch=0.0, yaw=0.0):
         return [roll, pitch, hover_rc, yaw, 1.0, 0.0, 0.0, -1.0]
@@ -53,12 +58,35 @@ def write_ghost(path, hover_rc=-0.155, axis=0, step_value=0.5,
 
     rc_step = rc()
     rc_step[axis] = step_value
-    samples = [
-        sample(0.0, rc()),
-        sample(hover_sec, rc_step),
-        sample(hover_sec + step_sec, rc()),
-        sample(hover_sec + step_sec + settle_sec, rc()),
-    ]
+    ramp_s = ramp_ms / 1e3
+
+    def rc_at(t):
+        """rc at time t, with the step edge ramped over ramp_s."""
+        v = rc()
+        if hover_sec <= t < hover_sec + step_sec:
+            k = 1.0 if ramp_s == 0 else min(1.0, (t - hover_sec) / ramp_s)
+            v = list(v)
+            v[axis] = step_value * k
+        elif t >= hover_sec + step_sec and ramp_s > 0:
+            # symmetric ramp on the way back down
+            k = max(0.0, 1.0 - (t - (hover_sec + step_sec)) / ramp_s)
+            v = list(v)
+            v[axis] = step_value * k
+        return v
+
+    if rc_rate_hz or ramp_ms:
+        dt = 1.0 / (rc_rate_hz or 2000.0)
+        t_end = hover_sec + step_sec + settle_sec
+        samples = [sample(i * dt, rc_at(i * dt))
+                   for i in range(int(t_end / dt) + 1)]
+        samples.append(sample(t_end, rc()))
+    else:
+        samples = [
+            sample(0.0, rc()),
+            sample(hover_sec, rc_step),
+            sample(hover_sec + step_sec, rc()),
+            sample(hover_sec + step_sec + settle_sec, rc()),
+        ]
     with open(path, "w") as f:
         json.dump({"trackId": 0, "quadId": 0, "samples": samples}, f)
     print(f"wrote {path}: axis rc{axis} step {step_value} at t={hover_sec}s "

@@ -76,7 +76,7 @@ def set_roll_pid(P, I, D):
         time.sleep(1)
 
 
-def set_roll_ff(F_roll, pid=(45, 80, 30)):
+def set_roll_ff(F_roll, pid=(45, 80, 30), smooth=None, boost=None):
     """Start idle sim, restore roll PID, set roll feedforward via
     MSP_SET_PID_ADVANCED, save eeprom, kill sim.
 
@@ -129,6 +129,20 @@ def set_roll_ff(F_roll, pid=(45, 80, 30)):
             27,          # acro angle limit
             F_roll, 125, 0,  # F: roll target, pitch default, yaw 0
             0)           # antiGravityMode
+        # API1.41+ tail: d_max r/p/y, d_max_gain, d_max_advance,
+        # integrated_yaw, yaw_relax | iterm_relax_cutoff |
+        # motor_output_limit, auto_profile_cell_count, dyn_idle_min_rpm |
+        # ff_averaging, ff_smooth, ff_boost, ff_max_rate_limit,
+        # ff_jitter, vbat_sag, thrust_linear  (values read from MSP 94)
+        adv += bytes([0, 46, 0, 37, 20, 0, 200,   # 1.41 block (copied)
+                      15,                          # iterm_relax_cutoff
+                      100, 0, 0,                   # 1.43 block
+                      1,                           # ff_averaging
+                      25 if smooth is None else smooth,
+                      15 if boost is None else boost,
+                      90,                          # ff_max_rate_limit
+                      7,                           # ff_jitter_factor
+                      0, 0])                       # vbat_sag, thrust_linear
         print("  set_adv:", msp(ws, 95, adv).hex())
         print("  eep:", msp(ws, 250).hex())
         ws.close()
@@ -147,7 +161,7 @@ def run_step(tag):
         if os.path.exists(p):
             os.remove(p)
     subprocess.run([PB, "g", GHOST,
-                    "--config", "config/quad/hq-51mm-whoop.json",
+                    "--config", "config/quad/hq-51mm-micro.json",
                     "-ff", "-no"],
                    cwd=PB_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run([DECODE, "blackbox.bbl"], cwd=PB_DIR,
@@ -181,10 +195,12 @@ def metrics(csv_path):
 
 
 def main():
-    for F in (0, 120, 200):
-        print(f"feedforward F={F} (default P45/I80/D30)")
-        set_roll_ff(F)
-        csv = run_step(f"step_ff{F}")
+    import os as _os
+    tag_extra = _os.path.basename(GHOST).replace("ghost_", "").replace(".json", "")
+    for F, smooth, boost in ((128, 0, 19), (128, 0, 0), (0, 25, 15)):
+        print(f"F={F} smooth={smooth} boost={boost} (default P45/I80/D30)")
+        set_roll_ff(F, smooth=smooth, boost=boost)
+        csv = run_step(f"step_F{F}_s{smooth}_b{boost}_{tag_extra}")
         m = metrics(csv)
         print(f"  measured: rise={m['rise_ms']:.0f}ms "
               f"overshoot={m['overshoot_pct']:.0f}% "
