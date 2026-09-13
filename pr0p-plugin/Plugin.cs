@@ -395,6 +395,25 @@ namespace Pr0pCustomModel
                 assigned[i] = propPivots[bestJ];
                 var mt = assigned[i].GetComponent<Motor>();
                 if (mt != null) mt.rotationDir = mdir[i];
+                // The shutter shader smears the prop around the mesh-local
+                // axis _Axis (the donor prop meshes are Z-authored, hence
+                // _Axis=+-Z). Our imported mesh axis is -Z in object space,
+                // and the pivot spins about world +Y by rotationDir*rpm,
+                // which is dir*(-Z) in mesh space -> _Axis = (0,0,-dir).
+                // Motor.Start does renderer.material (a clone), so a shared
+                // per-prop clone here keeps the right axis per direction.
+                if (propMat != null)
+                {
+                    var prend = assigned[i]
+                        .GetComponentInChildren<Renderer>();
+                    if (prend != null)
+                    {
+                        var pmat = new Material(propMat);
+                        pmat.SetVector("_Axis",
+                            new Vector4(0f, 0f, -mdir[i], 0f));
+                        prend.sharedMaterial = pmat;
+                    }
+                }
                 Log.Write($"motor{i + 1} -> {propPivots[bestJ].name} " +
                           $"pos={propPivots[bestJ].transform.localPosition} " +
                           $"target={(mpos[i] * 1000f)} err={best:F1}mm " +
@@ -431,11 +450,16 @@ namespace Pr0pCustomModel
             go.transform.SetParent(pivot.transform, true);
 
             // thin box approximating the prop disk; the pivot origin is the
-            // bounds center so the collider is centered at zero
+            // bounds center so the collider is centered at zero. The mesh
+            // node carries a stand-up rotation (disc authored in XY, axis
+            // +Z like the donor prop meshes), so its bounds must be rotated
+            // into pivot space: the prop disk is wide in X/Z, thin in Y.
             var bc = pivot.AddComponent<BoxCollider>();
-            var size = mesh.bounds.size;
-            bc.size = new Vector3(size.x,
-                Mathf.Max(size.y, 1.5f), size.z); // mm units
+            Vector3 sz = go.transform.localRotation * mesh.bounds.size;
+            sz = new Vector3(Mathf.Abs(sz.x), Mathf.Abs(sz.y),
+                             Mathf.Abs(sz.z));
+            bc.size = new Vector3(sz.x,
+                Mathf.Max(sz.y, 1.5f), sz.z); // mm units
             bc.center = Vector3.zero;
             colliders.Add(bc);
 

@@ -183,10 +183,17 @@ def _slice_one_blade(mesh):
     return m
 
 
-def _prop_axis_to_y(mesh):
-    """Rotate extracted prop so its axis (Z) becomes +Y."""
+def _prop_axis_to_z(mesh):
+    """Rotate a +Y-axis prop so its spin axis becomes +Z.
+
+    The game rotates prop pivots about world Y, but the donor's
+    PropellerRollingShutter shader blurs around the mesh-local axis in
+    ``_Axis`` (+-Z for the donor's Z-authored prop meshes). Keep the
+    mesh Z-authored like the donor and put the stand-up rotation on the
+    prop's scene node instead of baking it into the vertices.
+    """
     mesh.apply_transform(
-        trimesh.transformations.rotation_matrix(np.radians(-90), [1, 0, 0])
+        trimesh.transformations.rotation_matrix(np.radians(90), [1, 0, 0])
     )
     return mesh
 
@@ -243,8 +250,11 @@ def extract_slayer_prop():
     print(f"[prop] tip radii: blade {r_b.max():.2f} mm, "
           f"mirror {r_o.max():.2f} mm")
 
+    # Keep the donor's convention: prop disc in the XY plane, spin axis +Z
+    # (the node transform stands it up; the shutter shader's _Axis expects
+    # a Z-authored mesh). The importer's Z-negation makes it -Z in Unity,
+    # matching PropellerRollingShutter2.
     prop = trimesh.util.concatenate([blade, other, hub])
-    _prop_axis_to_y(prop)
     print(f"[prop] extracted slayer prop, tip r={tip_r:.4f} m -> 51mm 2-blade")
     return prop
 
@@ -278,7 +288,8 @@ def procedural_prop():
     other.apply_transform(
         trimesh.transformations.rotation_matrix(np.pi, [0, 1, 0]))
     print("[prop] procedural fallback prop")
-    return trimesh.util.concatenate([hub, blade, other])
+    # authored axis +Y -> +Z to match the shutter-shader convention
+    return _prop_axis_to_z(trimesh.util.concatenate([hub, blade, other]))
 
 
 def make_prop():
@@ -356,16 +367,21 @@ def main():
     motor_dirs = [(1, -1), (1, 1), (-1, -1), (-1, 1)]  # M1..M4 per config
     motor = make_motor()
     prop = make_prop()
+    prop_nodes = {}
     for i, (sx, sz) in enumerate(motor_dirs, start=1):
         parts[f"arm{i}"] = make_arm((sx * MOTOR_X, sz * MOTOR_Z))
         m = motor.copy()
         m.apply_translation((sx * MOTOR_X, 0, sz * MOTOR_Z))
         parts[f"motor{i}"] = m
-        p = prop.copy()
-        # prop's lowest point sits 0.2mm above the bell top (~flush)
-        p.apply_translation(
-            (sx * MOTOR_X, PROP_Y - p.bounds[0][1], sz * MOTOR_Z))
-        parts[f"prop{i}"] = p
+        # prop mesh stays Z-authored (disc in XY, axis +Z); the node
+        # rotation -90degX maps +Z -> +Y so the disc lies flat. The prop's
+        # lowest vertex (mesh z_min -> world y) sits ~flush on the bell.
+        R = trimesh.transformations.rotation_matrix(
+            np.radians(-90), [1, 0, 0])
+        t = np.array([sx * MOTOR_X, PROP_Y - prop.bounds[0][2],
+                      sz * MOTOR_Z])
+        M = trimesh.transformations.translation_matrix(t) @ R
+        prop_nodes[f"prop{i}"] = (prop.copy(), M)
 
     cam_mesh, lens_pt = make_camera()
     parts["camera"] = cam_mesh
@@ -384,6 +400,9 @@ def main():
     scene = trimesh.Scene()
     for name, mesh in parts.items():
         scene.add_geometry(mesh, geom_name=name, node_name=name)
+    for name, (mesh, M) in prop_nodes.items():
+        scene.add_geometry(mesh, geom_name=name, node_name=name,
+                           transform=M)
     # empty marker node: the FPV camera anchor (lens optical center).
     # The plugin prefers this over the camera mesh's bounds center.
     anchor_T = np.eye(4)
