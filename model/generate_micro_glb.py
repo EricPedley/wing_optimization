@@ -297,19 +297,33 @@ def make_camera():
     """Micro cam centered vertically between the plates (y ~= 8.75mm) at the
     front (-Z) plate edge, tilted up ~27 degrees. Uses fpvcam.stl when
     present (recentred: the STL's origin sits at the top of the body);
-    falls back to a box + lens stub."""
+    falls back to a box + lens stub.
+
+    Returns (mesh, lens_point): lens_point is the optical center of the
+    lens front face in GLB coords -- the FPV camera anchor goes there,
+    NOT at the mesh bounds center (the lens barrel protrudes up-forward
+    of the body, so bounds-center sits ~4mm low and ~7mm aft, below the
+    prop plane and nearly at ground level when landed).
+    """
     cam_y = PLATE_T / 2 + STANDOFF_H / 2  # mid-height between plates
     cam_z = -(PLATE_L / 2 - 5.0)          # pushed to the front edge
     if os.path.isfile(FPVCAM_STL):
         cam = trimesh.load(FPVCAM_STL, force="mesh")
-        cam.apply_translation((0, -0.5 * (cam.bounds[0][1]
-                                          + cam.bounds[1][1]), 0))
+        # lens face = the -Y extremity of the authored lens-up STL
+        lens_pt = np.array([0.0, cam.bounds[0][1], 0.0])
+        recenter = -0.5 * (cam.bounds[0][1] + cam.bounds[1][1])
+        M = (trimesh.transformations.translation_matrix((0, cam_y, cam_z))
+             @ trimesh.transformations.rotation_matrix(
+                 np.radians(117), [1, 0, 0])
+             @ trimesh.transformations.translation_matrix(
+                 (0, recenter, 0)))
+        cam.apply_translation((0, recenter, 0))
         # STL is authored lens-up; pitch 90 + 27 so it faces -Z tilted up
         cam.apply_transform(
             trimesh.transformations.rotation_matrix(
                 np.radians(117), [1, 0, 0]))
         cam.apply_translation((0, cam_y, cam_z))
-        return cam
+        return cam, (M @ np.append(lens_pt, 1.0))[:3]
     cam = box(14.0, 14.0, 14.0)
     cam.apply_transform(
         trimesh.transformations.rotation_matrix(np.radians(27), [1, 0, 0]))
@@ -317,9 +331,13 @@ def make_camera():
     lens = cyl(3.5, 2.0)
     lens.apply_transform(
         trimesh.transformations.rotation_matrix(np.radians(-63), [1, 0, 0]))
-    lens.apply_translation((0, cam_y + 6.0 * np.sin(np.radians(27)),
-                            cam_z - 7.0 * np.cos(np.radians(27))))
-    return trimesh.util.concatenate([cam, lens])
+    lens_c = np.array([0.0, cam_y + 6.0 * np.sin(np.radians(27)),
+                       cam_z - 7.0 * np.cos(np.radians(27))])
+    lens.apply_translation(lens_c)
+    # fallback lens is a 2mm stub along the tilted axis; face sits ~1mm out
+    lens_pt = lens_c + np.array(
+        [0.0, np.sin(np.radians(27)), -np.cos(np.radians(27))])
+    return trimesh.util.concatenate([cam, lens]), lens_pt
 
 
 def main():
@@ -349,7 +367,8 @@ def main():
             (sx * MOTOR_X, PROP_Y - p.bounds[0][1], sz * MOTOR_Z))
         parts[f"prop{i}"] = p
 
-    parts["camera"] = make_camera()
+    cam_mesh, lens_pt = make_camera()
+    parts["camera"] = cam_mesh
 
     # 1S 680mAh pack on the top plate, long axis front-back
     batt_y = top_y + PLATE_T / 2 + 4.0
@@ -365,8 +384,15 @@ def main():
     scene = trimesh.Scene()
     for name, mesh in parts.items():
         scene.add_geometry(mesh, geom_name=name, node_name=name)
+    # empty marker node: the FPV camera anchor (lens optical center).
+    # The plugin prefers this over the camera mesh's bounds center.
+    anchor_T = np.eye(4)
+    anchor_T[:3, 3] = lens_pt
+    scene.graph.update(frame_to="camera_anchor",
+                       frame_from=scene.graph.base_frame, matrix=anchor_T)
     scene.export(OUT_GLB)
-    print(f"wrote {OUT_GLB} ({len(parts)} parts)")
+    print(f"wrote {OUT_GLB} ({len(parts)} parts, "
+          f"camera_anchor at {np.round(lens_pt, 2)})")
 
 
 if __name__ == "__main__":

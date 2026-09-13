@@ -37,8 +37,11 @@ The instantiated root is scaled 0.001 (mm → m) and left unrotated.
   every frame, so a rotated root would point the FPV camera backwards.
 - All other nodes get box colliders fitted to mesh bounds; every collider
   (incl. the camera sphere) is added to `ModelConfig.colliders`.
-- `cameraPosition` = child transform at the `camera` node bounds center
-  (identity rotation — the game drives camera tilt itself).
+- `cameraPosition` = child transform at the GLB's empty `camera_anchor`
+  marker node (the lens optical center — the mesh bounds center sits low
+  because the lens barrel protrudes above the camera body). Falls back to
+  the `camera` node bounds center. Identity rotation — the game drives
+  camera tilt itself.
 - `cameraCollider` = child GO with a `SphereCollider`. Unity 6.2's managed
   `SphereCollider` has no `radius` binding, so the GO is scaled ×14 to make
   the default 0.5-unit radius ≈ 7 mm in world space.

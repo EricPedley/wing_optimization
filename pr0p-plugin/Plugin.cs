@@ -288,12 +288,21 @@ namespace Pr0pCustomModel
                     donorMotors[i], donorProps[i], propMat, colliders));
             }
 
-            // camera anchor: child of root at the camera node's bounds center.
+            // camera anchor: child of root at the lens optical center.
+            // The GLB carries an empty "camera_anchor" marker node for this;
+            // fall back to the camera mesh's bounds center (which sits low:
+            // the lens barrel protrudes above the body, pulling the bounds
+            // top up while the optical axis is near the front-top edge).
             // The game drives localRotation (camera angle), so keep identity.
             var camPos = new GameObject("CameraPosition");
             camPos.transform.SetParent(root.transform, false);
-            if (res.nodes.TryGetValue("camera", out var camNode) &&
-                res.meshes.TryGetValue(camNode, out var camMesh))
+            if (res.nodes.TryGetValue("camera_anchor", out var camAnchor))
+            {
+                camPos.transform.localPosition =
+                    camAnchor.transform.localPosition;
+            }
+            else if (res.nodes.TryGetValue("camera", out var camNode) &&
+                     res.meshes.TryGetValue(camNode, out var camMesh))
             {
                 camPos.transform.localPosition =
                     camNode.transform.localPosition + camMesh.bounds.center;
