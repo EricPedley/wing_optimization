@@ -1,0 +1,2 @@
+- airfoil lift/drag and control surface simulation in SimITL
+- analysis of of quadcopter model control limits with MPC

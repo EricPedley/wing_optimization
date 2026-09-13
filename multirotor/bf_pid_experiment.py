@@ -197,14 +197,44 @@ def metrics(csv_path):
 def main():
     import os as _os
     tag_extra = _os.path.basename(GHOST).replace("ghost_", "").replace(".json", "")
+    if _os.environ.get("GRID"):
+        grid(tag_extra)
+        return
     for F, smooth, boost in ((128, 0, 19), (128, 0, 0), (0, 25, 15)):
         print(f"F={F} smooth={smooth} boost={boost} (default P45/I80/D30)")
         set_roll_ff(F, smooth=smooth, boost=boost)
         csv = run_step(f"step_F{F}_s{smooth}_b{boost}_{tag_extra}")
-        m = metrics(csv)
-        print(f"  measured: rise={m['rise_ms']:.0f}ms "
+
+
+def grid(tag_extra):
+    """Sweep (wc rad/s, PM deg) margin-designed gains on roll, FF off."""
+    sys.path.insert(0, os.path.expanduser("~/code/wing_optimization"))
+    from multirotor.rate_plant import design_margins
+
+    SU, SP, SD, SI = 6.67e-4, 0.0320, 2.05e-4, 3.62e-3
+    rows = []
+    for wc, pm in ((40, 70), (60, 70)):
+        r = design_margins("roll", wc, pm, ki=80*SU*SI*57.3,
+                           delay_s=3e-3)
+        P, I, D = pid_to_bf(r["kp"], r["ki"], r["kd"])
+        for Dmod in (D, D // 2):
+            P = int(round(np.clip(P, 0, 255)))
+            Dm = int(round(np.clip(Dmod, 0, 255)))
+            I = 80
+            print(f"wc={wc} PM={pm} Dmod={Dm}: kp={r['kp']:.3f} "
+                  f"kd={r['kd']:.5f} -> P={P} I={I} D={Dm}")
+            set_roll_ff(0, pid=(P, I, Dm))
+            csv = run_step(f"margin_wc{wc}_pm{pm}_d{Dm}_{tag_extra}")
+            m = metrics(csv)
+            m.update(wc=wc, pm=pm, P=P, D=Dm)
+            rows.append(m)
+        print(f"  -> rise={m['rise_ms']:.0f}ms "
               f"overshoot={m['overshoot_pct']:.0f}% "
-              f"steady={m['steady']:.0f}/{m['setpoint']:.0f} dps")
+              f"steady={m['steady']:.0f}dps")
+    print("\n=== grid summary ===")
+    for m in rows:
+        print(f"wc={m['wc']} PM={m['pm']} P={m['P']} D={m['D']}: "
+              f"rise={m['rise_ms']:.0f}ms ov={m['overshoot_pct']:.0f}%")
 
 
 if __name__ == "__main__":

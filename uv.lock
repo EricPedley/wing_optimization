@@ -311,6 +311,7 @@ dependencies = [
     { name = "jaxopt" },
     { name = "modopt", extra = ["jax", "open-source-optimizers"] },
     { name = "numpy" },
+    { name = "osqp" },
     { name = "plotly" },
     { name = "scipy" },
 ]
@@ -323,6 +324,7 @@ requires-dist = [
     { name = "jaxopt", specifier = ">=0.8.5" },
     { name = "modopt", extras = ["jax", "open-source-optimizers"], git = "https://github.com/lsdolab/modopt.git?rev=main" },
     { name = "numpy", specifier = ">=2.5.1" },
+    { name = "osqp", specifier = "==1.1.3" },
     { name = "plotly", specifier = ">=6.9.0" },
     { name = "scipy", specifier = ">=1.18.0" },
 ]

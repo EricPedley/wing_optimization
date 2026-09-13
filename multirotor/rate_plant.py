@@ -1,8 +1,8 @@
 """Linearized per-axis rate plant for PID analysis/derivation.
 
 Plant: motor-command delta u (throttle fraction) ->
-  effective voltage  v = VBAT * frac^DUTY_GAMMA
-  motor torque       T_m(v, w)   (affine in rpm, drops with back-EMF)
+  effective voltage  v = max(1 V, sagged battery voltage) * filtered PWM
+  motor torque       T_m(v, w)   (SimITL's Kt = 8.3/kV, not the optimizer's)
   prop drag torque   T_p(w)      (quadratic in rpm)
   prop rpm dynamics  J_prop * dw/dt = T_m - T_p   -> first-order lag
   thrust             T(w) = b*rpm + a*rpm^2       (SimITL prop model)
@@ -14,78 +14,173 @@ Linearizing at hover gives the textbook quad rate plant
     P(s) = K / (s * (tau*s + 1)) * e^(-Ls)
 
 per axis, where tau is the motor/prop spin-up time constant, K folds in
-lever arm, dT/drpm, the voltage map slope, and 1/I, and L is a lumped delay
-for gyro filtering + PID-loop + ESC update (estimated ~2-4 ms, the dominant
-phase-margin killer and the main thing this module does NOT get from
-physics -- it's a measurement-side quantity).
+lever arm, dT/drpm, the voltage map slope, and 1/I. Filters and delay are
+still reduced separately by the PID analysis below, not simulated here.
+The axis input u is the difference between opposing pairs' commands:
+individual motors change by +/-u/2. Balanced differential commands do not
+change mean PWM, hence do not change battery sag to first order.
 
-All jacobians come from jax.grad on motor_model/prop functions, so the
-plant inherits the same calibrated constants the design optimizer used.
+The realized parts, mass and body inertia come from the pinned SimITL
+quad/component JSONs. The JAX voltage, battery and motor functions mirror
+SimITL/src/sim/physics.cpp without changing the design optimizer. Battery
+noise samples are explicit randf() values in [-1, 1], defaulting to zero
+for deterministic analysis. battery_step returns voltage evaluated BEFORE
+its capacity update, matching SimITL's updateBat ordering.
+
+This remains a nominal symmetric, zero-inflow rate reduction: individual
+motorVariance, noise, damage and thermal dynamics are excluded. Yaw uses
+steady prop drag reaction, not SimITL's transient motor-reaction torque.
 """
+
+import json
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 import multirotor.motor_model as mm
-import multirotor.quad_inertia as qi
-import multirotor.quad_model as qm
 
 RPM2RADS = 2.0 * jnp.pi / 60.0
+KT_NUMERATOR = 8.3
 
-# The realized build (matches config/quad/hq-51mm-whoop.json)
+# The realized build (matches config/quad/hq-51mm-micro.json)
 KV = 11500.0
 STATOR_VOLUME_MM3 = 339.3          # 1203
 PROP_DIAMETER_M = 0.051
 BLADE_COUNT = 2.0
 PITCH_M = 0.0381
-VBAT = qm.VBAT
+DEFAULT_QUAD_CONFIG = (Path(__file__).resolve().parents[1] / "SimITL" / "tools"
+                       / "simitl-playback" / "config" / "quad" / "hq-51mm-micro.json")
+_OCV_DRAWN = jnp.array([-.06, 0., .01, .04, .50, .60, .85, 1., 1.01, 1.03, 1.06, 1.08])
+_OCV_VOLTS = jnp.array([4.4, 4.2, 4.05, 3.97, 3.85, 3.7, 3.63, 3.49, 3.4, 3.3, 3., 0.])
 
 
-def _unit():
-    return qm.motor_prop_unit(KV, STATOR_VOLUME_MM3, PROP_DIAMETER_M,
-                              BLADE_COUNT, PITCH_M)
-
-
-def hover_point(unit=None):
-    """Hover throttle fraction / volts / rpm / thrust for the real build."""
-    unit = unit or _unit()
-    mass = (qm.OTHER_MASS_KG + 0.0 + 4 * (unit["motor_mass"] + unit["prop_mass"])
-            + 0.0424 * 0)  # see note: frame+elec+battery baked in quad_inertia
-    # use the inertia module's mass breakdown directly
-    mass = (qi.FRAME_ELECTRONICS_MASS_KG + qi.BATTERY_MASS_KG
-            + 4 * (unit["motor_mass"] + unit["prop_mass"]))
-    need = mass * qm.G / 4.0
-
-    lo, hi = 0.0, 1.0
-    for _ in range(60):
-        mid = 0.5 * (lo + hi)
-        v = qm.effective_voltage(VBAT, mid)
-        rpm = float(mm.steady_state_rpm(
-            v, 0.0, KV, unit["resistance"], unit["i0"], unit["prop_a_factor"],
-            unit["prop_torque_factor"], unit["prop_max_rpm"],
-            unit["thrust_factor_x"], unit["thrust_factor_y"],
-            unit["thrust_factor_z"]))
-        t = float(mm.prop_thrust(
-            rpm, 0.0, unit["prop_a_factor"], unit["prop_max_rpm"],
-            unit["thrust_factor_x"], unit["thrust_factor_y"],
-            unit["thrust_factor_z"]))
-        if t < need:
-            lo = mid
+def _unit(config_path=DEFAULT_QUAD_CONFIG):
+    config_path = Path(config_path)
+    quad = json.loads(config_path.read_text())
+    components = {}
+    for kind in ("motor", "propeller", "battery"):
+        for path in sorted((config_path.parent.parent / kind).glob("*.json")):
+            component = json.loads(path.read_text())
+            if component["name"] == quad[kind]:
+                components[kind] = component
+                break
         else:
-            hi = mid
-    frac = 0.5 * (lo + hi)
-    volts = float(qm.effective_voltage(VBAT, frac))
-    rpm = float(mm.steady_state_rpm(
-        volts, 0.0, KV, unit["resistance"], unit["i0"], unit["prop_a_factor"],
-        unit["prop_torque_factor"], unit["prop_max_rpm"],
-        unit["thrust_factor_x"], unit["thrust_factor_y"],
-        unit["thrust_factor_z"]))
-    thrust = float(mm.prop_thrust(
-        rpm, 0.0, unit["prop_a_factor"], unit["prop_max_rpm"],
-        unit["thrust_factor_x"], unit["thrust_factor_y"],
-        unit["thrust_factor_z"]))
-    return dict(frac=frac, volts=volts, rpm=rpm, thrust_n=thrust, mass=mass)
+            raise ValueError(f"Missing {kind} config for {quad[kind]!r}")
+    motor, prop, battery = (components[k] for k in ("motor", "propeller", "battery"))
+    return dict(
+        kv=motor["motorKV"], resistance=motor["motorR"], i0=motor["motorI0"],
+        motor_mass=motor["mass"], prop_mass=prop["mass"], prop_inertia=prop["propInertia"],
+        prop_a_factor=prop["propAFactor"], prop_torque_factor=prop["propTorqueFactor"],
+        prop_max_rpm=prop["propMaxRpm"],
+        **{f"thrust_factor_{a}": prop["propThrustFactor"][a] for a in "xyz"},
+        frame_electronics_mass=quad["mass"], battery_mass=battery["mass"],
+        battery_capacity_mah=battery["batCapacity"],
+        battery_capacity_charged_mah=battery["batCapacityCharged"],
+        battery_cell_count=battery["batCellCount"], max_voltage_sag=battery["maxVoltageSag"],
+        inertia=np.array([1.0 / quad["invInertia"][a] for a in "xyz"]),
+        motor_positions=np.array([[quad[f"motor{i}Pos"][a] for a in "xyz"]
+                                  for i in range(1, 5)]))
+
+
+def battery_voltage(remaining_mah, motor_pwm, unit, noise_sample=0.0):
+    drawn = 1.0 - remaining_mah / jnp.maximum(unit["battery_capacity_mah"], 1.0)
+    ocv = jnp.maximum(jnp.interp(drawn, _OCV_DRAWN, _OCV_VOLTS)
+                      * unit["battery_cell_count"], 0.1)
+    charge_inv = 1.0 - remaining_mah / jnp.maximum(unit["battery_capacity_charged_mah"], 1.0)
+    mean_pwm = jnp.maximum(jnp.mean(jnp.broadcast_to(motor_pwm, (4,))), 0.0)
+    sag = unit["max_voltage_sag"] * mean_pwm**2 * (1.0 + charge_inv**2)
+    return jnp.clip(ocv - sag - jnp.abs(noise_sample * 0.01), 0.0, 100.0)
+
+
+def effective_voltage(vbat, throttle_frac):
+    return jnp.maximum(vbat, 1.0) * throttle_frac
+
+
+def battery_step(remaining_mah, motor_pwm, motor_current_a, dt, unit,
+                 voltage_noise_sample=0.0, consumption_noise_sample=0.0):
+    vbat = battery_voltage(remaining_mah, motor_pwm, unit, voltage_noise_sample)
+    pwm = jnp.broadcast_to(motor_pwm, (4,))
+    currents = jnp.broadcast_to(motor_current_a, (4,))
+    current = jnp.sum(jnp.abs(currents) * jnp.clip(pwm, 0.0, 1.0))
+    minimum = jnp.minimum(0.2, (0.5 + consumption_noise_sample * 0.25)
+                          / jnp.maximum(vbat, 0.01))
+    drain = jnp.maximum(current / 3.6, minimum)
+    remaining = remaining_mah - drain * dt
+    return dict(vbat=vbat, current_a=drain * 3.6, remaining_mah=remaining,
+                mah_drawn=unit["battery_capacity_charged_mah"] - remaining)
+
+
+def motor_torque(volts, rpm, unit):
+    kv = jnp.maximum(unit["kv"], 0.0001)
+    kt = KT_NUMERATOR / kv
+    raw = (volts - rpm / kv) / jnp.maximum(unit["resistance"], 0.0001) * kt
+    friction = unit["i0"] * kt
+    return jnp.where(rpm > 1.0, raw - friction,
+                     jnp.where(rpm < -1.0, raw + friction,
+                               raw - jnp.clip(raw, -friction, friction)))
+
+
+def motor_current(torque, unit):
+    return torque * unit["kv"] / KT_NUMERATOR
+
+
+def prop_thrust(rpm, unit, vel=0.0):
+    return mm.prop_thrust(rpm, vel, unit["prop_a_factor"], unit["prop_max_rpm"],
+                          unit["thrust_factor_x"], unit["thrust_factor_y"],
+                          unit["thrust_factor_z"])
+
+
+def steady_state_rpm(volts, unit, vel=0.0):
+    kv = jnp.maximum(unit["kv"], 0.0001)
+    resistance = jnp.maximum(unit["resistance"], 0.0001)
+    kt = KT_NUMERATOR / kv
+    maxrpm = jnp.maximum(unit["prop_max_rpm"], 0.01)
+    thrust_factor = mm.prop_thrust_factor(vel, unit["thrust_factor_x"],
+                                         unit["thrust_factor_y"], unit["thrust_factor_z"])
+    prop_b = (thrust_factor - unit["prop_a_factor"] * maxrpm**2) / maxrpm
+    a = unit["prop_torque_factor"] * unit["prop_a_factor"]
+    b = unit["prop_torque_factor"] * prop_b + kt / (kv * resistance)
+    c = kt * (unit["i0"] - volts / resistance)
+    rpm = -2.0 * c / (b + jnp.sqrt(jnp.maximum(b*b - 4*a*c, 0.0)))
+    return jnp.maximum(rpm, 0.0)
+
+
+def hover_point(unit=None, remaining_mah=None):
+    """Nominal symmetric hover at the given remaining capacity (mAh).
+
+    Defaults to the configured initial charge. Solves throttle and sag
+    together, with zero battery noise and settled actuator filters.
+    """
+    unit = unit or _unit()
+    mass = unit["frame_electronics_mass"] + unit["battery_mass"]  # frame+elec+battery from config
+    # use the realized config's mass breakdown directly
+    mass += 4 * (unit["motor_mass"] + unit["prop_mass"])
+    need = mass * 9.81 / 4.0
+    if remaining_mah is None:
+        remaining_mah = unit["battery_capacity_charged_mah"]
+
+    def operating_point(frac):
+        vbat = battery_voltage(remaining_mah, jnp.full(4, frac), unit)
+        volts = effective_voltage(vbat, frac)
+        rpm = steady_state_rpm(volts, unit)
+        return vbat, volts, rpm, prop_thrust(rpm, unit)
+
+    if float(operating_point(1.0)[3]) < need:
+        raise ValueError("Insufficient thrust to hover at this battery charge")
+
+    def bisect(_, bounds):
+        lo, hi = bounds
+        mid = 0.5 * (lo + hi)
+        below = operating_point(mid)[3] < need
+        return jnp.where(below, mid, lo), jnp.where(below, hi, mid)
+
+    lo, hi = jax.lax.fori_loop(0, 60, bisect, (0.0, 1.0))
+    frac = float(0.5 * (lo + hi))
+    vbat, volts, rpm, thrust = map(float, operating_point(frac))
+    return dict(frac=frac, volts=volts, rpm=rpm, thrust_n=thrust, mass=mass,
+                vbat=vbat, remaining_mah=remaining_mah)
 
 
 def plant(axis="roll", unit=None, hover=None):
@@ -93,7 +188,9 @@ def plant(axis="roll", unit=None, hover=None):
 
     axis: 'roll' (torque about z, lever = |x| of motor pos),
           'pitch' (about x, lever = |z|), or
-          'yaw' (about y, reaction torque from prop drag).
+          'yaw' (about y, steady reaction torque from prop drag).
+    u is the command difference between opposing pairs (+/-u/2 per motor).
+    Pass hover_point(unit, remaining_mah=...) to select battery charge.
     """
     unit = unit or _unit()
     hover = hover or hover_point(unit)
@@ -101,31 +198,28 @@ def plant(axis="roll", unit=None, hover=None):
     volts = hover["volts"]
     frac = hover["frac"]
 
-    kt = float(mm.motor_constant(KV))
-    R = float(unit["resistance"])
-    a_f = float(unit["prop_a_factor"])
-    tqf = float(unit["prop_torque_factor"])
-    maxrpm = float(unit["prop_max_rpm"])
-    tfz = float(unit["thrust_factor_z"])  # vel=0 -> thrust factor = z only
+    tqf = float(unit["prop_torque_factor"])  # vel=0 -> thrust factor = z only
 
     # --- prop-side slopes at hover rpm (SI, rad/s) -------------------------
     # SimITL thrust model: T(rpm) = b*rpm + a*rpm^2
-    b = (tfz - a_f * maxrpm**2) / maxrpm
-    dT_drpm = b + 2.0 * a_f * rpm            # N per rpm
+    dT_drpm = jax.grad(lambda r: prop_thrust(r, unit))(rpm)  # N per rpm
     dT_dw = dT_drpm / RPM2RADS               # N per (rad/s)
     dQ_dw = tqf * dT_dw                       # prop drag torque slope, N.m.s
 
     # --- motor-side slopes -------------------------------------------------
     # T_m = (v - w_rpm/kv)/R * kt - friction; dTm/dw_rpm = -kt/(kv*R)
-    dTm_dw = -kt / (KV * R) / RPM2RADS        # N.m per (rad/s)
-    dTm_dv = kt / R                           # N.m per volt
+    dTm_dw = jax.grad(lambda r: motor_torque(volts, r, unit))(rpm) / RPM2RADS  # N.m per (rad/s)
+    dTm_dv = jax.grad(lambda v: motor_torque(v, rpm, unit))(volts)  # N.m per volt
 
     # rpm lag: J dw/dt = (dTm_dw - dQ_dw) w + ... ; tau = J/(dQ_dw - dTm_dw)
-    J = float(unit["prop_inertia"])
+    J = max(float(unit["prop_inertia"]), 1e-8)
     tau = J / (dQ_dw - dTm_dw)
 
-    # input gain: volts per unit throttle at hover frac
-    dv_du = VBAT * qm.DUTY_GAMMA * frac ** (qm.DUTY_GAMMA - 1.0)
+    # input gain: volts per unit throttle at hover frac, balanced differential PWM
+    direction = jnp.array([1.0, 1.0, -1.0, -1.0])
+    dv_du = jax.grad(lambda delta: effective_voltage(
+        battery_voltage(hover["remaining_mah"], frac + delta * direction, unit),
+        frac + delta))(0.0)
 
     # rpm response per throttle unit: dTm_dv * dv_du / (dQ_dw - dTm_dw)
     dw_du = dTm_dv * dv_du / (dQ_dw - dTm_dw)   # rad/s per unit throttle
@@ -133,8 +227,8 @@ def plant(axis="roll", unit=None, hover=None):
     # thrust per throttle unit
     dT_du = dT_dw * dw_du                       # N per unit throttle
 
-    I = qi.quad_inertia()["I"]
-    pos = qi.MOTOR_POSITIONS_M
+    I = unit["inertia"]
+    pos = unit["motor_positions"]
     if axis == "roll":      # rotation about z; left pair vs right pair
         lever = abs(pos[0][0])
         # 2 motors each side: dTorque = 2*lever*dT
@@ -148,8 +242,8 @@ def plant(axis="roll", unit=None, hover=None):
     else:
         raise ValueError(axis)
 
-    return dict(K=K, tau=tau, dv_du=dv_du, dw_du=dw_du, dT_du=dT_du,
-                J=J, hover=hover)
+    return dict(K=float(K), tau=float(tau), dv_du=float(dv_du), dw_du=float(dw_du),
+                dT_du=float(dT_du), J=J, hover=hover)
 
 
 def closed_loop_pid(K, tau, kp, ki, kd, delay=0.0, T=0.4, dt=1e-4):
@@ -227,16 +321,78 @@ def place_poles(axis, wn_rad_s, zeta=0.7, delay_s=0.003):
     return dict(kp=kp, ki=ki, kd=kd, wc=wc, phase_margin_deg=pm)
 
 
+def loop_with_filters(axis, kp, ki, kd, delay_s=0.0,
+                      f_gyro_hz=250.0, f_dterm_hz=75.0, f_dterm2_hz=150.0):
+    """Open loop L(jw) with the real measurement-path filters.
+
+    e = sp - G_g(s)*y          (P/I see gyro-filtered measurement)
+    D path: kd*s*G_g*G_d(s)*y  (D sees gyro+D lowpassed measurement)
+
+    L(s) = P(s)*e^(-Ls) * [ (kp + ki/s)*G_g + kd*s*G_g*G_d ]
+    """
+    p = plant(axis)
+    K, tau = p["K"], p["tau"]
+    w = np.logspace(0, 4, 20001)
+    s = 1j * w
+    G_g = 1.0 / (1.0 + s / (2 * np.pi * f_gyro_hz))
+    G_d = G_g / (1.0 + s / (2 * np.pi * f_dterm_hz))
+    if f_dterm2_hz:
+        G_d = G_d / (1.0 + s / (2 * np.pi * f_dterm2_hz))
+    P = K / (s * (tau * s + 1.0))
+    C = (kp + ki / s) * G_g + kd * s * G_d
+    L = P * C * np.exp(-s * delay_s)
+    return w, L
+
+
+def design_margins(axis, wc, pm_deg, ki=0.0, delay_s=0.0,
+                   f_gyro_hz=250.0, f_dterm_hz=75.0, f_dterm2_hz=150.0):
+    """Solve kp,kd so L(jw) has gain=1 at w=wc with phase margin pm_deg,
+    using the full open loop (filters + delay). ki is held fixed.
+    Two equations: |L(jwc)|=1 and angle(L(jwc))=-180+pm_deg."""
+    p = plant(axis)
+    K, tau = p["K"], p["tau"]
+    jw = 1j * wc
+    G_g = 1.0 / (1.0 + jw / (2 * np.pi * f_gyro_hz))
+    G_d = G_g / (1.0 + jw / (2 * np.pi * f_dterm_hz))
+    if f_dterm2_hz:
+        G_d = G_d / (1.0 + jw / (2 * np.pi * f_dterm2_hz))
+    P = K / (jw * (tau * jw + 1.0)) * np.exp(-jw * delay_s)
+    # C(jw) = (kp + ki/s)*G_g + kd*s*G_d  =>  C = kp*A + kd*B + ki*A/s
+    A = G_g
+    B = jw * G_d
+    Cki = ki * A / jw
+    # need P*(kp*A + kd*B + Cki) = 1 at phase -180+pm
+    target = np.exp(1j * (-np.pi + np.radians(pm_deg)))  # L(jwc) value
+    needed = target / P                                  # required C(jwc)
+    M = np.array([[A.real, B.real], [A.imag, B.imag]])
+    rhs = np.array([(needed - Cki).real, (needed - Cki).imag])
+    kp, kd = np.linalg.solve(M, rhs)
+    return dict(kp=kp, kd=kd, ki=ki, wc=wc, pm_deg=pm_deg)
+
+
+def stability_check(axis, kp, ki, kd, **kw):
+    """Phase margin + predicted stability for given gains."""
+    w, L = loop_with_filters(axis, kp, ki, kd, **kw)
+    mag = np.abs(L)
+    i = np.argmin(np.abs(mag - 1.0))
+    wc = w[i]
+    pm = np.degrees(np.pi + np.angle(L[i]))
+    # instability signature: does |L| exceed 1 while phase < -180?
+    bad = np.any((np.abs(L) > 1.0) & (np.unwrap(np.angle(L)) < -np.pi))
+    return dict(wc=wc, phase_margin_deg=pm, unstable=bool(bad))
+
+
 def main():
     unit = _unit()
     hover = hover_point(unit)
-    print(f"hover: throttle {hover['frac']:.3f}, {hover['volts']:.2f} V, "
-          f"{hover['rpm']:.0f} rpm, {hover['thrust_n']*1000:.0f} g-f/motor, "
+    print(f"hover: battery {hover['vbat']:.3f} V at {hover['remaining_mah']:.0f} mAh, "
+          f"throttle {hover['frac']:.3f}, motor {hover['volts']:.2f} V, "
+          f"{hover['rpm']:.0f} rpm, {hover['thrust_n']/9.81*1000:.1f} g-f/motor, "
           f"mass {hover['mass']*1e3:.1f} g")
     for axis in ("roll", "pitch", "yaw"):
         p = plant(axis, unit, hover)
-        print(f"{axis:5s}: K={p['K']:.3f} (rad/s^2 per throttle unit), "
-              f"tau={p['tau']*1e3:.1f} ms, dT/du={p['dT_du']*1000:.0f} gf")
+        print(f"{axis:5s}: K={p['K']:.3f} (rad/s^2 per pair-command difference), "
+              f"tau={p['tau']*1e3:.1f} ms, dT/du={p['dT_du']:.3f} N/throttle")
 
     print()
     print("pole-placed roll PID vs target bandwidth "
