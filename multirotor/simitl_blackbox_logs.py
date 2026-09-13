@@ -24,9 +24,10 @@ def axes_waveform(t, value, lead_s=1., step_s=.4, settle_s=.4):
 
 def run_blackbox_log(controller, output_bbl, rc_value=1., dt=.002, seed=7,
                      step_s=.4, settle_s=.4, lead_s=1., tail_s=.5,
-                     horizon_ms=40., effort_weight=.1, slew_weight=0.):
+                     horizon_ms=40., effort_weight=.1, slew_weight=0.,
+                     pin_velocity=True):
     mode = "bf" if controller == "bf" else "external"
-    bridge = SimitlBridge(mode, seed=seed)
+    bridge = SimitlBridge(mode, seed=seed, pin_velocity=pin_velocity)
     policy = None
     if controller != "bf":
         policy = FourMotorController(FourMotorPlant(dt=dt), controller, horizon_ms,
@@ -68,11 +69,13 @@ def main():
                         default=Path("quad_design_outputs/optimal_control/blackbox"))
     parser.add_argument("--rc", type=float, default=1.)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--no-pin", dest="pin", action="store_false",
+                        help="let the quad translate (default: pinned in place)")
     args = parser.parse_args()
     logs = {}
     for controller, name in (("bf", "pid_axes.bbl"), ("mpc", "mpc_axes.bbl")):
         path = run_blackbox_log(controller, args.output / name, rc_value=args.rc,
-                                seed=args.seed)
+                                seed=args.seed, pin_velocity=args.pin)
         logs[controller] = path
         print(f"{controller}: {path} ({path.stat().st_size} bytes)", flush=True)
         if DECODE.is_file():

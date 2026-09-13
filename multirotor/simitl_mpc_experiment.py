@@ -23,7 +23,8 @@ HOVER_RC = -0.155
 
 
 class SimitlBridge:
-    def __init__(self, mode, seed=7, quad_config=QUAD_CONFIG, eeprom=EEPROM):
+    def __init__(self, mode, seed=7, quad_config=QUAD_CONFIG, eeprom=EEPROM,
+                 pin_velocity=False):
         if mode not in ("bf", "external"):
             raise ValueError("mode must be bf or external")
         for path, name in ((BRIDGE, "bridge binary"), (quad_config, "quad config"),
@@ -35,7 +36,8 @@ class SimitlBridge:
             stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self._request({"op": "init", "mode": mode, "seed": seed,
                        "quad_config": str(quad_config.resolve()),
-                       "eeprom_source": str(eeprom.resolve())})
+                       "eeprom_source": str(eeprom.resolve()),
+                       "pin_velocity": pin_velocity})
         self.mode = mode
 
     def _request(self, request):
@@ -81,14 +83,14 @@ def rc_waveform(t, axis, value, hover_s=2., step_s=.8):
 def run_simitl_case(case_name, axis=0, rc_value=.5, controller="bf",
                     horizon_ms=40., effort_weight=.1, slew_weight=0.,
                     collective_weight=10., dt=.002, duration_s=4., seed=7,
-                    observation="estimated"):
+                    observation="estimated", pin_velocity=True):
     if controller not in ("bf", "lqr", "mpc"):
         raise ValueError("controller must be bf, lqr, or mpc")
     if dt <= 0 or abs(round(dt / TICK_S) * TICK_S - dt) > 1e-12:
         raise ValueError("dt must be a positive multiple of the 0.125ms sim tick")
     steps = round(duration_s / dt)
     mode = "bf" if controller == "bf" else "external"
-    bridge = SimitlBridge(mode, seed=seed)
+    bridge = SimitlBridge(mode, seed=seed, pin_velocity=pin_velocity)
     policy = None
     if controller != "bf":
         policy = FourMotorController(FourMotorPlant(dt=dt), controller, horizon_ms,
@@ -157,8 +159,10 @@ def run_simitl_case(case_name, axis=0, rc_value=.5, controller="bf",
                slew_weight=slew_weight if controller == "mpc" else 0.,
                collective_weight=collective_weight if controller != "bf" else None,
                dt_s=dt, seed=seed, observation=observation,
+               pin_velocity=pin_velocity,
                model="simitl_closed_loop_physics_bf_sensors" + (
-                   "_external_motor_pwm" if mode == "external" else "_bf_pid"),
+                   "_external_motor_pwm" if mode == "external" else "_bf_pid") + (
+                   "" if pin_velocity else "_free_translation"),
                reference="bf_setpoint_deg_s from identical rc waveform",
                measurement="gyro_deg_s (BF filtered gyro)",
                clipped_lqr_steps=clipped,
