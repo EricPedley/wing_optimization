@@ -16,15 +16,15 @@ from multirotor.rate_control_experiment import save_results
 ROOT = Path(__file__).resolve().parent.parent
 SIMITL = ROOT / "SimITL"
 BRIDGE = SIMITL / "build/linux/tools/simitl-playback/simitl-controller-bridge"
-QUAD_CONFIG = SIMITL / "tools/simitl-playback/config/quad/hq-51mm-micro.json"
+QUAD_CONFIG = SIMITL / "tools/simitl-playback/config/quad/hq-65mm-micro.json"
 EEPROM = SIMITL / "tools/simitl-playback/test.bin"
 TICK_S = 0.000125
-HOVER_RC = -0.155
+HOVER_RC = -0.19
 
 
 class SimitlBridge:
     def __init__(self, mode, seed=7, quad_config=QUAD_CONFIG, eeprom=EEPROM,
-                 pin_velocity=False):
+                 pin_velocity=False, controller=None):
         if mode not in ("bf", "external"):
             raise ValueError("mode must be bf or external")
         for path, name in ((BRIDGE, "bridge binary"), (quad_config, "quad config"),
@@ -34,10 +34,13 @@ class SimitlBridge:
         self.process = subprocess.Popen(
             [str(BRIDGE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1)
-        self._request({"op": "init", "mode": mode, "seed": seed,
-                       "quad_config": str(quad_config.resolve()),
-                       "eeprom_source": str(eeprom.resolve()),
-                       "pin_velocity": pin_velocity})
+        init = {"op": "init", "mode": mode, "seed": seed,
+                "quad_config": str(quad_config.resolve()),
+                "eeprom_source": str(eeprom.resolve()),
+                "pin_velocity": pin_velocity}
+        if controller is not None:
+            init["controller"] = controller
+        self._request(init)
         self.mode = mode
 
     def _request(self, request):
@@ -55,12 +58,14 @@ class SimitlBridge:
                 raise RuntimeError(f"Bridge error: {response.get('error')}")
             return response
 
-    def step(self, dt_s, motor_pwm=None, rc=None):
+    def step(self, dt_s, motor_pwm=None, rc=None, prop_damage=None):
         request = {"op": "step", "dt_s": dt_s}
         if motor_pwm is not None:
             request["motor_pwm"] = [float(v) for v in motor_pwm]
         if rc is not None:
             request["rc"] = [float(v) for v in rc]
+        if prop_damage is not None:
+            request["prop_damage"] = [float(v) for v in prop_damage]
         return self._request(request)
 
     def close(self):
@@ -84,15 +89,16 @@ def run_simitl_case(case_name, axis=0, rc_value=.5, controller="bf",
                     horizon_ms=40., effort_weight=.1, slew_weight=0.,
                     collective_weight=10., dt=.002, duration_s=4., seed=7,
                     observation="estimated", pin_velocity=True):
-    if controller not in ("bf", "lqr", "mpc"):
-        raise ValueError("controller must be bf, lqr, or mpc")
+    if controller not in ("bf", "lqr", "mpc", "mpc-embedded", "mpc-switch"):
+        raise ValueError("controller must be bf, lqr, mpc, mpc-embedded, or mpc-switch")
     if dt <= 0 or abs(round(dt / TICK_S) * TICK_S - dt) > 1e-12:
         raise ValueError("dt must be a positive multiple of the 0.125ms sim tick")
     steps = round(duration_s / dt)
-    mode = "bf" if controller == "bf" else "external"
-    bridge = SimitlBridge(mode, seed=seed, pin_velocity=pin_velocity)
+    mode = "bf" if controller in ("bf", "mpc-switch") else "external"
+    bridge = SimitlBridge(mode, seed=seed, pin_velocity=pin_velocity,
+                          controller="mpc" if controller == "mpc-embedded" else None)
     policy = None
-    if controller != "bf":
+    if controller in ("lqr", "mpc"):
         policy = FourMotorController(FourMotorPlant(dt=dt), controller, horizon_ms,
                                      effort_weight, slew_weight, collective_weight,
                                      noise_dps=1.)
@@ -105,20 +111,32 @@ def run_simitl_case(case_name, axis=0, rc_value=.5, controller="bf",
     timing = np.zeros(steps)
     qp_timing = np.zeros(steps)
     successes = np.ones(steps, dtype=bool)
+    fw_active = np.zeros(steps, dtype=bool)
+    fw_solve_us = np.zeros(steps)
     statuses = []
     clipped = 0
     try:
-        obs = bridge.step(dt, motor_pwm=[.05] * 4 if mode == "external" else None,
+        obs = bridge.step(dt, motor_pwm=[.05] * 4 if controller in ("lqr", "mpc") else None,
                           rc=rc_command())
         gyro[0] = np.deg2rad(obs["gyro_deg_s"])
         setpoint[0] = np.deg2rad(obs["bf_setpoint_deg_s"])
         body[0] = np.deg2rad(obs["body_rates_deg_s"])
         for k in range(steps):
             rc = rc_waveform(t[k + 1], axis, rc_value)
+            if controller == "mpc-switch":
+                # Flip AUX2 -> BOXMPC -> in-firmware generated MPC after 1 s.
+                rc[5] = 1. if t[k + 1] >= 1. else 0.
             if policy is None:
+                started = perf_counter()
                 obs = bridge.step(dt, rc=rc)
-                command = np.asarray(obs["bf_motor_pwm"], dtype=float)
-                status, qp_time, was_clipped = "betaflight", 0., False
+                timing[k] = perf_counter() - started
+                qp_time = obs.get("mpc_solve_us", 0.) / 1e6
+                command = np.asarray(obs["bf_motor_pwm"] if controller == "bf"
+                                     else obs["motor_pwm"], dtype=float)
+                status, was_clipped = (
+                    "mpc-fw" if obs.get("mpc_fw_active") else
+                    ("betaflight" if controller in ("bf", "mpc-switch")
+                     else "mpc-embedded")), False
             else:
                 started = perf_counter()
                 command, diag = policy.command(
@@ -136,6 +154,8 @@ def run_simitl_case(case_name, axis=0, rc_value=.5, controller="bf",
                 obs = bridge.step(dt, motor_pwm=np.clip(command, .05, 1.), rc=rc)
             pwm[k] = np.asarray(obs["motor_pwm"], dtype=float)
             bf_pwm[k] = np.asarray(obs["bf_motor_pwm"], dtype=float)
+            fw_active[k] = obs.get("mpc_fw_active", False)
+            fw_solve_us[k] = obs.get("mpc_fw_solve_us", 0.)
             gyro[k + 1] = np.deg2rad(obs["gyro_deg_s"])
             setpoint[k + 1] = np.deg2rad(obs["bf_setpoint_deg_s"])
             body[k + 1] = np.deg2rad(obs["body_rates_deg_s"])
@@ -174,7 +194,8 @@ def run_simitl_case(case_name, axis=0, rc_value=.5, controller="bf",
     trace = dict(label=label, t=t, reference=setpoint, rates=measured,
                  commands=pwm, bf_commands=bf_pwm, body_rates=body,
                  solve_times_s=timing, qp_solve_times_s=qp_timing,
-                 solver_success=successes)
+                 solver_success=successes, mpc_fw_active=fw_active,
+                 mpc_fw_solve_us=fw_solve_us)
     return row, trace
 
 

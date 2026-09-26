@@ -1,0 +1,35 @@
+// Minimal Eigen::Matrix stand-in so the symforce-generated headers compile
+// without the real Eigen.  Column-major layout, fixed size, stack only --
+// everything an MCU flight loop can afford.  Add methods here as generated
+// code demands them.
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+
+namespace Eigen {
+
+template <typename Scalar, int Rows, int Cols>
+class Matrix {
+ public:
+  static constexpr int rows = Rows;
+  static constexpr int cols = Cols;
+
+  Matrix() = default;
+
+  Scalar& operator()(int r, int c) { return data_[c * Rows + r]; }
+  const Scalar& operator()(int r, int c) const { return data_[c * Rows + r]; }
+
+  Scalar* data() { return data_; }
+  const Scalar* data() const { return data_; }
+
+  void setZero() {
+    for (int i = 0; i < Rows * Cols; ++i) data_[i] = Scalar(0);
+  }
+
+ private:
+  Scalar data_[Rows * Cols];
+};
+
+}  // namespace Eigen

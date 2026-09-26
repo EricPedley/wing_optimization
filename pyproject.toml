@@ -14,6 +14,7 @@ dependencies = [
     "osqp==1.1.3",
     "plotly>=6.9.0",
     "scipy>=1.18.0",
+    "symforce>=0.12.0",
 ]
 
 [tool.uv.sources]
