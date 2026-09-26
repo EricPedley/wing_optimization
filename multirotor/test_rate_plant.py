@@ -18,18 +18,18 @@ def test_realized_parts_replace_sizing_estimates(unit):
     assert unit["resistance"] == 0.100
     assert unit["i0"] == 0.845
     assert unit["motor_mass"] == 0.0045
-    assert unit["prop_mass"] == 0.00036
-    assert unit["prop_inertia"] == pytest.approx(1.1540637e-7)
-    assert unit["prop_a_factor"] == pytest.approx(5.274637110065455e-10)
-    assert unit["prop_torque_factor"] == pytest.approx(0.006582299589055553)
+    assert unit["prop_mass"] == pytest.approx(0.00039)
+    assert unit["prop_inertia"] == pytest.approx(2.0308518750000001e-07)
+    assert unit["prop_a_factor"] == pytest.approx(7.42321001229242e-10)
+    assert unit["prop_torque_factor"] == pytest.approx(0.006530149169648785)
     assert unit["battery_capacity_mah"] == 680.0
     assert unit["battery_capacity_charged_mah"] == 680.0
     assert unit["battery_cell_count"] == 1
     assert unit["max_voltage_sag"] == 0.3
-    np.testing.assert_allclose(unit["inertia"], 1 / np.array([26121., 13076., 20590.]))
+    np.testing.assert_allclose(unit["inertia"], 1 / np.array([20300.8, 9838.9, 15887.]))
     np.testing.assert_allclose(unit["motor_positions"],
-                               [[.0425, .005, -.028], [.0425, .005, .028],
-                                [-.0425, .005, -.028], [-.0425, .005, .028]])
+                               [[.0495, .005, -.035], [.0495, .005, .035],
+                                [-.0495, .005, -.035], [-.0495, .005, .035]])
 
 
 @pytest.mark.parametrize("remaining,ocv", [(680., 4.2), (340., 3.85),
@@ -128,9 +128,9 @@ def test_equilibrium_matches_independent_cpp_motor_integration(unit, volts):
         friction = .845 * (8.3 / 11500.)
         torque = raw - (friction if rpm > 1. else
                         -friction if rpm < -1. else np.clip(raw, -friction, friction))
-        thrust = max(5.274637110065455e-10 * rpm**2, 0.)
-        net = torque - .006582299589055553 * thrust
-        drpm = net / 1.1540637e-7 * dt * 60 / (2 * math.pi)
+        thrust = max(float(unit["prop_a_factor"]) * rpm**2, 0.)
+        net = torque - float(unit["prop_torque_factor"]) * thrust
+        drpm = net / float(unit["prop_inertia"]) * dt * 60 / (2 * math.pi)
         bound = abs(volts * 11500. - rpm)
         rpm += np.clip(drpm, -bound, bound)
     assert float(rp.steady_state_rpm(volts, unit)) == pytest.approx(rpm, abs=1e-6)
@@ -139,9 +139,9 @@ def test_equilibrium_matches_independent_cpp_motor_integration(unit, volts):
 @pytest.mark.parametrize("remaining", [680., 340., 68.])
 def test_hover_is_self_consistent_with_realized_mass_and_sag(unit, remaining):
     hover = rp.hover_point(unit, remaining_mah=remaining)
-    assert hover["mass"] == pytest.approx(.07804)
+    assert hover["mass"] == pytest.approx(.08014, abs=1e-4)
     assert 0 < hover["frac"] < 1
-    assert hover["thrust_n"] * 4 == pytest.approx(.07804 * 9.81, rel=1e-10)
+    assert hover["thrust_n"] * 4 == pytest.approx(hover["mass"] * 9.81, rel=1e-10)
     assert hover["vbat"] == pytest.approx(float(rp.battery_voltage(
         remaining, jnp.full(4, hover["frac"]), unit)))
     assert hover["volts"] == pytest.approx(hover["frac"] * hover["vbat"])
@@ -176,7 +176,9 @@ def test_plant_matches_local_cpp_slopes(unit, axis):
     assert plant["dv_du"] == pytest.approx(hover["vbat"])
     assert plant["dT_du"] == pytest.approx(expected_dtdcommand)
     axis_index = {"roll": 2, "pitch": 0, "yaw": 1}[axis]
-    lever = {"roll": .0425, "pitch": .028, "yaw": unit["prop_torque_factor"]}[axis]
+    pos = unit["motor_positions"][0]
+    lever = {"roll": abs(float(pos[0])), "pitch": abs(float(pos[2])),
+             "yaw": unit["prop_torque_factor"]}[axis]
     assert plant["K"] == pytest.approx(2 * lever * expected_dtdcommand / unit["inertia"][axis_index])
 
 

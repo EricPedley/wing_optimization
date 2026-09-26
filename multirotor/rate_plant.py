@@ -44,14 +44,14 @@ import multirotor.motor_model as mm
 RPM2RADS = 2.0 * jnp.pi / 60.0
 KT_NUMERATOR = 8.3
 
-# The realized build (matches config/quad/hq-51mm-micro.json)
+# The realized build (matches config/quad/hq-65mm-micro.json)
 KV = 11500.0
 STATOR_VOLUME_MM3 = 339.3          # 1203
-PROP_DIAMETER_M = 0.051
+PROP_DIAMETER_M = 0.065
 BLADE_COUNT = 2.0
-PITCH_M = 0.0381
+PITCH_M = 0.0254
 DEFAULT_QUAD_CONFIG = (Path(__file__).resolve().parents[1] / "SimITL" / "tools"
-                       / "simitl-playback" / "config" / "quad" / "hq-51mm-micro.json")
+                       / "simitl-playback" / "config" / "quad" / "hq-65mm-micro.json")
 _OCV_DRAWN = jnp.array([-.06, 0., .01, .04, .50, .60, .85, 1., 1.01, 1.03, 1.06, 1.08])
 _OCV_VOLTS = jnp.array([4.4, 4.2, 4.05, 3.97, 3.85, 3.7, 3.63, 3.49, 3.4, 3.3, 3., 0.])
 
@@ -321,6 +321,16 @@ def place_poles(axis, wn_rad_s, zeta=0.7, delay_s=0.003):
     return dict(kp=kp, ki=ki, kd=kd, wc=wc, phase_margin_deg=pm)
 
 
+def _biquad_lpf(s, fc_hz):
+    """2nd-order Butterworth lowpass — matches Betaflight's biquad LPFs.
+
+    The real filters add roughly 2x the phase lag of a first-order
+    approximation near the cutoff; using them keeps pole-placement
+    honest at crossover above ~10 Hz."""
+    w0 = 2 * np.pi * fc_hz
+    return w0**2 / (s**2 + np.sqrt(2) * w0 * s + w0**2)
+
+
 def loop_with_filters(axis, kp, ki, kd, delay_s=0.0,
                       f_gyro_hz=250.0, f_dterm_hz=75.0, f_dterm2_hz=150.0):
     """Open loop L(jw) with the real measurement-path filters.
@@ -334,10 +344,10 @@ def loop_with_filters(axis, kp, ki, kd, delay_s=0.0,
     K, tau = p["K"], p["tau"]
     w = np.logspace(0, 4, 20001)
     s = 1j * w
-    G_g = 1.0 / (1.0 + s / (2 * np.pi * f_gyro_hz))
-    G_d = G_g / (1.0 + s / (2 * np.pi * f_dterm_hz))
+    G_g = _biquad_lpf(s, f_gyro_hz)
+    G_d = G_g * _biquad_lpf(s, f_dterm_hz)
     if f_dterm2_hz:
-        G_d = G_d / (1.0 + s / (2 * np.pi * f_dterm2_hz))
+        G_d = G_d * _biquad_lpf(s, f_dterm2_hz)
     P = K / (s * (tau * s + 1.0))
     C = (kp + ki / s) * G_g + kd * s * G_d
     L = P * C * np.exp(-s * delay_s)
@@ -352,10 +362,10 @@ def design_margins(axis, wc, pm_deg, ki=0.0, delay_s=0.0,
     p = plant(axis)
     K, tau = p["K"], p["tau"]
     jw = 1j * wc
-    G_g = 1.0 / (1.0 + jw / (2 * np.pi * f_gyro_hz))
-    G_d = G_g / (1.0 + jw / (2 * np.pi * f_dterm_hz))
+    G_g = _biquad_lpf(jw, f_gyro_hz)
+    G_d = G_g * _biquad_lpf(jw, f_dterm_hz)
     if f_dterm2_hz:
-        G_d = G_d / (1.0 + jw / (2 * np.pi * f_dterm2_hz))
+        G_d = G_d * _biquad_lpf(jw, f_dterm2_hz)
     P = K / (jw * (tau * jw + 1.0)) * np.exp(-jw * delay_s)
     # C(jw) = (kp + ki/s)*G_g + kd*s*G_d  =>  C = kp*A + kd*B + ki*A/s
     A = G_g

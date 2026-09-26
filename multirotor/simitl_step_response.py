@@ -7,7 +7,7 @@ Two halves:
    simitl-playback's ghost mode replays rcData verbatim after the 8s boot +
    0.1s arm sequence, so this is a rate-setpoint step response.
 
-   Run:   simitl-playback g ghost.json --config config/quad/hq-51mm-micro.json -ff -no
+   Run:   simitl-playback g ghost.json --config config/quad/hq-65mm-micro.json -ff -no
    from tools/simitl-playback/, producing quadstate.csv.
 
 2. `plot(csv_path)` reads quadstate.csv and plots commanded rate
@@ -28,7 +28,7 @@ import sys
 import numpy as np
 
 
-def write_ghost(path, hover_rc=-0.155, axis=0, step_value=0.5,
+def write_ghost(path, hover_rc=-0.19, axis=0, step_value=0.5,
                 hover_sec=2.0, step_sec=0.8, settle_sec=1.2,
                 rc_rate_hz=None, ramp_ms=0.0):
     """ghost.json: hover, then step `axis` (rcData index) by step_value.

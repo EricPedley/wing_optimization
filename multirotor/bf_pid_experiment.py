@@ -22,8 +22,8 @@ import time
 
 import numpy as np
 
-PB = os.path.expanduser("~/code/SimITL/build/linux/install/bin/simitl-playback")
-PB_DIR = os.path.expanduser("~/code/SimITL/tools/simitl-playback")
+PB = os.path.expanduser("~/code/wing_optimization/SimITL/build/linux/install/bin/simitl-playback")
+PB_DIR = os.path.expanduser("~/code/wing_optimization/SimITL/tools/simitl-playback")
 DECODE = os.path.expanduser("~/code/blackbox-tools/obj/blackbox_decode")
 
 # empirically fit scales (see module docstring)
@@ -161,7 +161,7 @@ def run_step(tag):
         if os.path.exists(p):
             os.remove(p)
     subprocess.run([PB, "g", GHOST,
-                    "--config", "config/quad/hq-51mm-micro.json",
+                    "--config", "config/quad/hq-65mm-micro.json",
                     "-ff", "-no"],
                    cwd=PB_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run([DECODE, "blackbox.bbl"], cwd=PB_DIR,
