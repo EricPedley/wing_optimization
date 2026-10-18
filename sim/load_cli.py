@@ -71,6 +71,10 @@ SIM_EXTRA = [
      "(MOTOR_PROTO); the SITL motor output is virtual, and motor_idle is the "
      "same fraction of throttle for PWM and DShot"),
     ("profile 0", "select the profile for the next line"),
+    ("set i_pitch = 80",
+     "pitch I-term to cancel the airspeed-dependent trim moment (sim sweep: "
+     "80 holds trim within ~3-6 deg and stays damped in hover; >=120 rings "
+     "in hover); apply to the real wing too, then drop this line"),
     ("set angle_tailsitter = ON",
      "patched Betaflight: ANGLE mode levels the nose-up hover "
      "(SimITL/patches/betaflight/0001-tailsitter-hover-angle-mode.patch)"),
