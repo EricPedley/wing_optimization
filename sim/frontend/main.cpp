@@ -269,6 +269,8 @@ int main(int argc, char** argv) {
     held = true;
     crashed = false;
     loscam.reset(cam, {in.position.x, in.position.y, in.position.z});
+    // fresh pack: SimITL's Repair refills the battery (and cools the motors)
+    simitl_command(CommandType::Repair);
   };
   launch();
   float propAngle[2] = {0, 0};
