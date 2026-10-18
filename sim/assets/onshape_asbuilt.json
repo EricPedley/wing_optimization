@@ -1,0 +1,40 @@
+{
+  "_source": "onshape d/fc16e035b9272e1f16de9511 w/8283d374293017844d6ea3cc assembly 8e364e94f22d49c4a15a2f6a",
+  "frame": "Flying Wing part studio: m, x fwd, y left, z up, origin root LE; right half only",
+  "hinge": {
+    "origin": [
+      -0.12128248961616618,
+      -0.021708208254532336,
+      0.0012793405912816525
+    ],
+    "axis": [
+      0.3616864033428107,
+      0.9322998153152996,
+      0.0
+    ]
+  },
+  "prop": {
+    "origin": [
+      -0.029459371356088292,
+      -0.06,
+      0.003
+    ],
+    "axis": [
+      -1.0,
+      -0.0,
+      -0.0
+    ]
+  },
+  "elevonBox": {
+    "lowX": -0.20021988988533013,
+    "highX": -0.11615481563193203,
+    "lowY": -0.14162154657321846,
+    "highY": -0.008994017856574898,
+    "lowZ": -0.010734878322218123,
+    "highZ": 0.008201027068626722
+  },
+  "meshes": {
+    "body": "body_right.stl",
+    "elevon": "elevon_right.stl"
+  }
+}

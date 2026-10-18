@@ -9,4 +9,6 @@ pr0p-plugin/patcher/bin/
 pr0p-plugin/patcher/obj/
 sim/frontend/build/
 sim/frontend/calib.json
+sim/frontend/wing_runtime.bin
 sim/__pycache__/
+sim/assets/terrain/scenery.bin

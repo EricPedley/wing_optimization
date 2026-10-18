@@ -3,9 +3,20 @@ the SimITL tailsitter physics (tools/simitl-wing/wingcfg.h) and by the JAX
 reference model (sim/wing_model.py).
 
 Sources:
-  * airfoil/optimum.json          - optimizer design vector (as-flown wing)
+  * airfoil/optimum.json          - optimizer design vector: the airfoil body
+                                    (planform, thickness, camber, sweep)
+  * Onshape `Final Assembly` mates - the elevons and props as built, which do
+                                    NOT follow the optimizer.  Cached in
+                                    sim/assets/onshape_asbuilt.json together
+                                    with the render meshes; refresh with
+                                    `--fetch`.
   * airfoil/airfoil_model.py      - geometry/camber/inertia helpers
   * airfoil/linkage_coupling.py   - servo linkage throw/advantage
+
+CAD frame: Onshape part-studio coordinates of the `Flying Wing` studio, metres,
+x forward, y left, z up, origin at the root leading edge.  Only the right half
+(y < 0) is modelled; the left half is its mirror.  Aero frame here: x forward
+from the CG, y right, z down, so aero = (cgX + x, -y, -z).
 
 Mass: measured all-up weight 80 g (Onshape mass properties are NOT used --
 they were never calibrated, see FLIGHT_SIM_PLAN).  Inertia uses the model's
@@ -16,7 +27,8 @@ JSON shape: no arrays -- the C++ tools/simitl-wing/wingcfg.h parser only
 understands objects/numbers/strings, so vectors are {x,y,z} objects and
 two-element lists become named fields.
 
-Run:  uv run python -m sim.as_built
+Run:  uv run python -m sim.as_built            # from cached CAD
+      uv run python -m sim.as_built --fetch    # refresh CAD from Onshape
 """
 
 import json
@@ -32,6 +44,156 @@ MEASURED_MASS_KG = 0.080          # user-measured all-up weight
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OPTIMUM = os.path.join(ROOT, "airfoil", "optimum.json")
 OUT = os.path.join(ROOT, "sim", "as_built.json")
+ASSETS = os.path.join(ROOT, "sim", "assets")
+CAD_CACHE = os.path.join(ASSETS, "onshape_asbuilt.json")
+
+# Onshape elements in the airfoil.onshape document
+ASSEMBLY_ID = "8e364e94f22d49c4a15a2f6a"      # Final Assembly
+PART_STUDIO_ID = "b893633847e2c346141c4f25"   # Flying Wing
+ELEVON_PART = "control surface"
+
+
+# --- Onshape extraction ---------------------------------------------------------
+
+
+def _mate_frames(asm):
+    """Revolute mates of the assembly as {name: [(occurrence names, cs)]}.
+
+    Each mated entity's coordinate system is in its own part's frame.  For the
+    parts used here that frame *is* the part-studio frame the STLs are in, so
+    no occurrence transform is applied -- the elevon mesh and its hinge must
+    share a frame, and the assembly solve nudges the occurrence by ~0.3 mm.
+    """
+    ra = asm["rootAssembly"]
+    names = {i["id"]: i["name"] for i in ra["instances"]}
+    mates = {}
+    for f in ra["features"]:
+        fd = f["featureData"]
+        if f["featureType"] != "mate" or fd.get("mateType") != "REVOLUTE":
+            continue
+        mates[fd["name"]] = [
+            ([names[x] for x in e["matedOccurrence"]], e["matedCS"])
+            for e in fd["matedEntities"]]
+    return mates
+
+
+def _entity(mate, name_prefix):
+    for occ, cs in mate:
+        if any(n.startswith(name_prefix) for n in occ):
+            return cs
+    raise KeyError(f"no mated entity on '{name_prefix}'")
+
+
+def fetch_cad():
+    """Pull hinge/prop mates and render meshes from Onshape into sim/assets."""
+    import base64
+    import urllib.parse
+    import urllib.request
+
+    from airfoil import onshape as osh
+
+    doc, ws = osh.DOCUMENT_ID, osh.WORKSPACE_ID
+    asm = osh._request(
+        "GET", f"/assemblies/d/{doc}/w/{ws}/e/{ASSEMBLY_ID}",
+        query={"includeMateFeatures": "true"})
+    mates = _mate_frames(asm)
+
+    hinge = prop = None
+    for mate in mates.values():
+        occ_names = [n for occ, _ in mate for n in occ]
+        if any(n.startswith(ELEVON_PART) for n in occ_names):
+            hinge = _entity(mate, ELEVON_PART)
+        elif any(n.startswith("motor mount") for n in occ_names):
+            prop = _entity(mate, "motor mount")
+    if hinge is None or prop is None:
+        raise RuntimeError(f"expected elevon and prop revolute mates, got "
+                           f"{list(mates)}")
+
+    parts = osh._request("GET", f"/parts/d/{doc}/w/{ws}/e/{PART_STUDIO_ID}")
+    by_name = {p["name"]: p["partId"] for p in parts}
+    elevon_id = by_name[ELEVON_PART]
+    body_ids = [pid for n, pid in by_name.items() if n != ELEVON_PART]
+    bb = osh._request(
+        "GET", f"/parts/d/{doc}/w/{ws}/e/{PART_STUDIO_ID}/partid/{elevon_id}"
+        "/boundingboxes")
+
+    access, secret = osh.credentials()
+    token = base64.b64encode(f"{access}:{secret}".encode()).decode()
+
+    def stl(part_ids, out_name):
+        query = urllib.parse.urlencode({
+            "partIds": ",".join(part_ids), "units": "meter",
+            "mode": "binary", "grouping": "true"})
+        url = (f"{osh.BASE_URL}/api/{osh.API_VERSION}/partstudios/d/{doc}"
+               f"/w/{ws}/e/{PART_STUDIO_ID}/stl?{query}")
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Basic {token}", "Accept": "*/*"})
+        with urllib.request.urlopen(req) as r:
+            data = r.read()
+        with open(os.path.join(ASSETS, out_name), "wb") as f:
+            f.write(data)
+
+    os.makedirs(ASSETS, exist_ok=True)
+    stl(body_ids, "body_right.stl")
+    stl([elevon_id], "elevon_right.stl")
+
+    cache = {
+        "_source": f"onshape d/{doc} w/{ws} assembly {ASSEMBLY_ID}",
+        "frame": "Flying Wing part studio: m, x fwd, y left, z up, "
+                 "origin root LE; right half only",
+        "hinge": {"origin": hinge["origin"], "axis": hinge["zAxis"]},
+        "prop": {"origin": prop["origin"], "axis": prop["zAxis"]},
+        "elevonBox": {k: bb[k] for k in
+                      ("lowX", "highX", "lowY", "highY", "lowZ", "highZ")},
+        "meshes": {"body": "body_right.stl", "elevon": "elevon_right.stl"},
+    }
+    with open(CAD_CACHE, "w") as f:
+        json.dump(cache, f, indent=2)
+    print(f"wrote {CAD_CACHE} and meshes in {ASSETS}")
+
+
+def load_cad():
+    with open(CAD_CACHE) as f:
+        return json.load(f)
+
+
+def cad_to_aero(v, cg):
+    """CAD point (x fwd, y left, z up, root-LE origin) -> aero frame."""
+    return np.array([cg + v[0], -v[1], -v[2]])
+
+
+def hinge_aero(cad, cg):
+    """Right/left hinge point and axis in the aero frame.
+
+    The right axis points outboard (+y); with the right-hand rule a positive
+    rotation then moves its trailing edge down, the physics' positive
+    deflection.  The left axis is the mirror of the right one as an axial
+    vector (reflect y, then negate), so it also points to the aircraft's
+    right -- inboard on the left wing -- and +deg is TE down there too.
+    """
+    pr = cad_to_aero(cad["hinge"]["origin"], cg)
+    ar = np.array(cad["hinge"]["axis"], dtype=float)
+    ar = np.array([ar[0], -ar[1], -ar[2]])          # direction, aero frame
+    if ar[1] < 0:                                     # outboard on the right
+        ar = -ar
+    ar /= np.linalg.norm(ar)
+    pl = pr * np.array([1, -1, 1])
+    al = -(ar * np.array([1, -1, 1]))
+    return pr, ar, pl, al
+
+
+def hinge_chord_fraction(cad, g, y_abs):
+    """Chord fraction of the as-built hinge line at spanwise station y_abs."""
+    o = np.array(cad["hinge"]["origin"], dtype=float)
+    d = np.array(cad["hinge"]["axis"], dtype=float)
+    t = (-y_abs - o[1]) / d[1]                        # right half: y_cad = -y
+    station_aft = -(o[0] + t * d[0])
+    semi = 0.5 * g["span"]
+    le = float(am.leading_edge_x(g["span"], y_abs / semi, g["le_sweep_deg"]))
+    c, _ = am.local_geometry(g["span"], g["root_chord"], g["tip_chord"],
+                             g["root_thickness"], g["tip_thickness"],
+                             y_abs / semi)
+    return (station_aft - le) / float(c)
 
 
 def build():
@@ -39,12 +201,14 @@ def build():
         opt = json.load(f)
     p = np.array(opt["x"], dtype=float)
     g = am.unpack(p)
+    cad = load_cad()
 
     semi = 0.5 * g["span"]
     cg = float(am.cg_station(
         g["span"], g["root_chord"], g["tip_chord"], g["root_thickness"],
         g["tip_thickness"], g["le_sweep_deg"], g["battery_station"],
-        g["servo_chord_frac"], g["servo_span_frac"], g["motor_standoff"]))
+        g["servo_chord_frac"], g["servo_span_frac"], g["motor_standoff"],
+        g["motor_y"]))
 
     # --- mass + inertia -----------------------------------------------------
     model_mass = float(am.total_mass(
@@ -65,40 +229,22 @@ def build():
         g["flap_x_mm"], g["flap_y_mm"])
     elevon_max_deg = float(lk["delta_max_deg"])
 
-    # --- motor / prop disk position -----------------------------------------
-    motor_y = g["motor_y"]
-    le_motor = float(am.leading_edge_x(
-        g["span"], abs(motor_y) / semi, g["le_sweep_deg"]))
-    # prop disk sits at the front face of the motor body:
-    # motor_station is the mass centre (-(standoff + body/2)), so the disk is
-    # another half body-length forward of that.
-    motor_x_aft = le_motor - (g["motor_standoff"] + am.MOTOR_BODY_LENGTH)
+    # --- motor / prop disk position (as built: Onshape prop mate) -----------
+    # The mate sits on the motor shaft at the prop; the optimizer's motor_y
+    # (35.8 mm) is not what was built.
+    prop_cad = np.array(cad["prop"]["origin"], dtype=float)
+    motor_y = float(-prop_cad[1])
+    motor_x_aft = float(-prop_cad[0])
+    motor_z = float(-prop_cad[2])
 
-    # --- hinge line, aerospace frame (x fwd, y right, z down) ---------------
-    # hinge station x, m aft of root LE, at each end of the elevon
-    def hinge_x(y_abs):
-        le = float(am.leading_edge_x(g["span"], y_abs / semi, g["le_sweep_deg"]))
-        c, _ = am.local_geometry(g["span"], g["root_chord"], g["tip_chord"],
-                                 g["root_thickness"], g["tip_thickness"],
-                                 y_abs / semi)
-        return le + float(am.hinge_fraction_at(float(c), g["x_hinge"],
-                                               float(mac))) * float(c)
-
-    xb = hinge_x(g["elevon_inboard_y"])
-    xe = hinge_x(g["elevon_outboard_y"])
-    yb, ye = g["elevon_inboard_y"], g["elevon_outboard_y"]
-    # hinge line direction on the right wing, expressed in aerospace coords
-    # (aero x = -(station - cg), aero y = +spanwise)
-    dx = (xb - xe)          # aft-positive difference -> negate for aero x
-    dy = ye - yb
-    axis_r = np.array([-dx, dy, 0.0])
-    axis_r /= np.linalg.norm(axis_r)
-    # mid-station hinge point, aerospace frame
-    ym = 0.5 * (yb + ye)
-    xm_aft = hinge_x(ym)
-    hinge_pt_r = [cg - xm_aft, ym, 0.0]
-    hinge_pt_l = [cg - xm_aft, -ym, 0.0]
-    axis_l = [-axis_r[0], axis_r[1], 0.0]  # mirror in span
+    # --- elevon + hinge line (as built: Onshape hinge mate, elevon part) ----
+    box = cad["elevonBox"]
+    elevon_in = float(-box["highY"])
+    elevon_out = float(-box["lowY"])
+    # the physics takes one hinge chord fraction; use its mean over the span
+    ys = np.linspace(elevon_in, elevon_out, 41)
+    x_hinge = float(np.mean([hinge_chord_fraction(cad, g, y) for y in ys]))
+    hinge_pt_r, axis_r, hinge_pt_l, axis_l = hinge_aero(cad, cg)
 
     doc = {
         "vehicleType": 1,
@@ -119,13 +265,13 @@ def build():
             "a1Root": g["camber_a1"], "a2Root": g["camber_a2"],
             "a1Tip": g["tip_camber_a1"], "a2Tip": g["tip_camber_a2"],
         },
-        "xHinge": g["x_hinge"],
-        "elevonInboardY": g["elevon_inboard_y"],
-        "elevonOutboardY": g["elevon_outboard_y"],
+        "xHinge": x_hinge,
+        "elevonInboardY": elevon_in,
+        "elevonOutboardY": elevon_out,
         "elevonMaxDeg": elevon_max_deg,
         "hinge": {
-            "pointR": {"x": hinge_pt_r[0], "y": hinge_pt_r[1],
-                       "z": hinge_pt_r[2]},
+            "pointR": {"x": float(hinge_pt_r[0]), "y": float(hinge_pt_r[1]),
+                       "z": float(hinge_pt_r[2])},
             "axisR":  {"x": float(axis_r[0]), "y": float(axis_r[1]),
                        "z": float(axis_r[2])},
             "pointL": {"x": hinge_pt_l[0], "y": hinge_pt_l[1],
@@ -135,8 +281,9 @@ def build():
         },
         "motorY": motor_y,
         "motorXAft": motor_x_aft,
-        "motorZ": 0.0,
+        "motorZ": motor_z,
         "motorSpinDir": {"right": 1, "left": -1},
+        "motorIndex": {"right": 1, "left": 0},
         "thrustScale": 1.0,
         "propDiameter": am.PROP_DIAMETER,
 
@@ -161,17 +308,18 @@ def build():
             "numStrips": 33,
         },
 
-        # typical micro-servo defaults (user: "typical micro-servo defaults")
-        # smix targets 2,3 are written to physical servo outputs 0,1 for
-        # CUSTOMAIRPLANE (SERVO_PLANE_INDEX_MIN=2 -> first physical output).
-        # Headless sign check (frozen pose, armed, stick pulses):
-        #   roll+  -> pwm0- pwm1-    (smix: t2=-r-p, t3=-r+p)
-        #   pitch+ -> pwm0- pwm1+
-        # For roll+ = right roll and pitch+ = nose up (both elevons TE up),
-        # output 0 must drive the RIGHT elevon (signR=+1 -> pwm down = TE up)
-        # and output 1 the LEFT (signL=-1 -> pwm up = TE up).  TE-down positive.
+        # Output mapping.  Which physical servo/motor sits on which BF output
+        # is not in the CLI dump, so it is fixed by two convention-free
+        # requirements, checked by sim/test_control_signs.py:
+        #   * every axis is negative feedback (an injected body rate makes BF
+        #     command a moment that opposes it), and
+        #   * stick right/forward/right gives roll right/nose down/nose right.
+        # smix: servo output 0 = -roll -pitch, output 1 = -roll +pitch; the
+        # right elevon is on output 1 and the left on output 0 (TE-down +).
+        # mmix: motor 0 = thr + yaw, motor 1 = thr - yaw; BF motor 1 (index 0)
+        # is the left prop.
         "servo": {
-            "indexL": 1, "indexR": 0,
+            "indexL": 0, "indexR": 1,
             "centerUs": 1500.0,
             # map BF servo output range to full elevon throw; the actual
             # usable pwm range is +/- ~450us around centre
@@ -207,10 +355,14 @@ def build():
                      elevon_max_deg=elevon_max_deg,
                      pushrod_m=pushrod,
                      advantage=float(lk["advantage"]),
-                     motor_x_aft=motor_x_aft)
+                     motor_x_aft=motor_x_aft, motor_y=motor_y,
+                     x_hinge=x_hinge, elevon_in=elevon_in,
+                     elevon_out=elevon_out)
 
 
 def main():
+    if "--fetch" in sys.argv[1:]:
+        fetch_cad()
     doc, derived = build()
     with open(OUT, "w") as f:
         json.dump(doc, f, indent=2)

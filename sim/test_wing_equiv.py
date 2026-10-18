@@ -113,7 +113,7 @@ def test_cpp_python_equivalence():
     errs_f, errs_m, worst, _ = compare(grid)
 
     f_tol = 1e-5   # N - implementations should be numerically identical
-    m_tol = 1e-7   # N.m
+    m_tol = 1e-6   # N.m - f_tol at the ~0.1 m moment arms of this airframe
     max_f = errs_f.max()
     max_m = errs_m.max()
     if max_f > f_tol or max_m > m_tol:

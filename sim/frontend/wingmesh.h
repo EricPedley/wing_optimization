@@ -1,9 +1,21 @@
 #pragma once
-// Procedural wing + elevon mesh built from the as_built.json parameters.
-// Everything is constructed in the SIM body frame (x=port, y=dorsal, z=nose),
-// same convention as TailsitterPhysics:
-//   aero (x fwd, y right, z down) -> sim (x_s=-y_a, y_s=-z_a, z_s=x_a)
+// Aircraft geometry for the front end: the Onshape CAD meshes exported by
+// `sim/as_built.py --fetch` (sim/assets/*.stl) and the as-built hinge/motor
+// placement from as_built.json.
+//
+// Frames
+//   CAD  : Onshape part studio, m, x fwd, y left, z up, origin root LE.
+//          Only the right half (y < 0) exists; the left half is its mirror.
+//   aero : x fwd from CG, y right, z down        = (cgX + x, -y, -z)
+//   sim  : x port, y dorsal, z nose (TailsitterPhysics body frame)
+//          = aeroToSim(aero) = (y_cad, z_cad, cgX + x_cad)
+//
+// raylib's MatrixMultiply(a, b) applies a FIRST, then b.  Everything that
+// hangs off the body is composed with bodyChild() so the order is in one place.
 
+#include <cstdio>
+#include <cstdint>
+#include <string>
 #include <vector>
 #include <cmath>
 #include <raylib.h>
@@ -12,18 +24,16 @@
 #include "json.h"
 
 struct WingGeom {
-  float span, rootChord, tipChord, rootHalf, sweepDeg;
-  float tcRoot, tcTip;
-  float camA1Root, camA2Root, camA1Tip, camA2Tip;
-  float cgX;                 // m aft of root LE
-  float xHinge;              // hinge line, fraction of chord
-  float elevIn, elevOut;     // elevon spanwise stations |y|, m
+  float span, cgX;
   Vector3 hingePtR, hingeAxR, hingePtL, hingeAxL;  // sim body frame
   float motorY, motorXAft, motorZ, propDia;
 };
 
 inline Vector3 aeroToSim(float xa, float ya, float za) {
   return Vector3{-ya, -za, xa};
+}
+inline Vector3 cadToSim(float x, float y, float z, float cgX) {
+  return Vector3{y, z, cgX + x};
 }
 inline Vector3 jvec3(const json::JsonObject& v) {
   const Vec3F a = v.asVec3();
@@ -34,210 +44,228 @@ inline WingGeom loadWingGeom(const std::string& path) {
   auto j = json::parseFile(path);
   WingGeom g{};
   g.span      = (float)j.get("span").asNumber(0.33);
-  g.rootChord = (float)j.get("rootChord").asNumber(0.15);
-  g.tipChord  = (float)j.get("tipChord").asNumber(0.08);
-  g.rootHalf  = (float)j.get("rootHalfWidth").asNumber(0.005);
-  g.sweepDeg  = (float)j.get("leSweepDeg").asNumber(0.0);
-  g.tcRoot    = (float)j.get("thicknessRatioRoot").asNumber(0.1);
-  g.tcTip     = (float)j.get("thicknessRatioTip").asNumber(0.1);
   g.cgX       = (float)j.get("cgX").asNumber(0.08);
-  g.xHinge    = (float)j.get("xHinge").asNumber(0.78);
-  g.elevIn    = (float)j.get("elevonInboardY").asNumber(0.02);
-  g.elevOut   = (float)j.get("elevonOutboardY").asNumber(0.15);
-  if (j.has("camber")) {
-    auto c = j.get("camber");
-    g.camA1Root = (float)c.get("a1Root").asNumber(0.0);
-    g.camA2Root = (float)c.get("a2Root").asNumber(0.0);
-    g.camA1Tip  = (float)c.get("a1Tip").asNumber(g.camA1Root);
-    g.camA2Tip  = (float)c.get("a2Tip").asNumber(g.camA2Root);
-  }
-  if (j.has("hinge")) {
-    auto h = j.get("hinge");
-    auto conv = [](const json::JsonObject& p) {
-      Vector3 a = jvec3(p);
-      return aeroToSim(a.x, a.y, a.z);
-    };
-    g.hingePtR = conv(h.get("pointR")); g.hingeAxR = conv(h.get("axisR"));
-    g.hingePtL = conv(h.get("pointL")); g.hingeAxL = conv(h.get("axisL"));
-  }
-  g.motorY    = (float)j.get("motorY").asNumber(0.036);
+  auto h = j.get("hinge");
+  auto conv = [](const json::JsonObject& p) {
+    const Vector3 a = jvec3(p);
+    return aeroToSim(a.x, a.y, a.z);
+  };
+  g.hingePtR = conv(h.get("pointR")); g.hingeAxR = conv(h.get("axisR"));
+  g.hingePtL = conv(h.get("pointL")); g.hingeAxL = conv(h.get("axisL"));
+  g.motorY    = (float)j.get("motorY").asNumber(0.06);
   g.motorXAft = (float)j.get("motorXAft").asNumber(0.0);
   g.motorZ    = (float)j.get("motorZ").asNumber(0.0);
   g.propDia   = (float)j.get("propDiameter").asNumber(0.05);
   return g;
 }
 
-// planform helpers (same formulas as tailsitter.cpp / airfoil_model.py)
-inline float wingLE(const WingGeom& g, float yAbs) {
-  return tanf(g.sweepDeg * (float)M_PI / 180.0f)
-         * fmaxf(yAbs - g.rootHalf, 0.0f);
-}
-inline float wingChord(const WingGeom& g, float yAbs) {
-  const float semi = 0.5f * g.span;
-  const float f0 = fminf(fmaxf(g.rootHalf / semi, 0.0f), 1.0f);
-  const float t = fminf(fmaxf((yAbs / semi - f0) / fmaxf(1.0f - f0, 1e-9f),
-                              0.0f), 1.0f);
-  return g.rootChord + (g.tipChord - g.rootChord) * t;
-}
-inline float wingTC(const WingGeom& g, float yAbs) {
-  const float semi = 0.5f * g.span;
-  const float f0 = fminf(fmaxf(g.rootHalf / semi, 0.0f), 1.0f);
-  const float t = fminf(fmaxf((yAbs / semi - f0) / fmaxf(1.0f - f0, 1e-9f),
-                              0.0f), 1.0f);
-  return g.tcRoot + (g.tcTip - g.tcRoot) * t;
-}
-// camber-line ordinate at chord fraction f (same expression as the physics'
-// camber scan), multiplied by chord
-inline float camberZ(const WingGeom& g, float yAbs, float f) {
-  const float semi = 0.5f * g.span;
-  const float f0 = fminf(fmaxf(g.rootHalf / semi, 0.0f), 1.0f);
-  const float t = fminf(fmaxf((yAbs / semi - f0) / fmaxf(1.0f - f0, 1e-9f),
-                              0.0f), 1.0f);
-  const float a1 = g.camA1Root + (g.camA1Tip - g.camA1Root) * t;
-  const float a2 = g.camA2Root + (g.camA2Tip - g.camA2Root) * t;
-  const float ct = 1.0f - 2.0f * f;
-  const float th = acosf(fminf(fmaxf(ct, -1.0f + 1e-9f), 1.0f - 1e-9f));
-  const float c = cosf(th);
-  return (a1 * sinf(th) * sinf(th) / 4.0f
-        + a2 * (-c * c * c / 3.0f + c / 2.0f - 1.0f / 6.0f)
-        + a2 * f / 3.0f) * wingChord(g, yAbs);
+// --- transforms ------------------------------------------------------------------
+
+// Body pose -> raylib matrix.  StateInput.rotation[i] is ROW i of the
+// body-to-world rotation (SimITL's mat3 convention: quat_to_mat3 and xform
+// work on rows), so body axis c in world is the column (rot[0][c], rot[1][c],
+// rot[2][c]).  The raylib initialiser below is also written row by row.
+inline Matrix bodyMatrix(const Vec3F rot[3], Vec3F pos) {
+  return Matrix{
+    rot[0].x, rot[0].y, rot[0].z, pos.x,
+    rot[1].x, rot[1].y, rot[1].z, pos.y,
+    rot[2].x, rot[2].y, rot[2].z, pos.z,
+    0, 0, 0, 1
+  };
 }
 
-// build a triangle-soup mesh covering one span segment [y0, y1] from chord
-// fraction fa to fb.  sim-frame vertices; top surface z_s positive.
-struct MeshBuilder {
-  std::vector<Vector3> v;
-  std::vector<Vector3> n;
-  std::vector<Vector2> uv;
-  void tri(Vector3 a, Vector3 b, Vector3 c, Vector3 norm) {
-    v.push_back(a); v.push_back(b); v.push_back(c);
-    n.push_back(norm); n.push_back(norm); n.push_back(norm);
-    uv.push_back({0,0}); uv.push_back({1,0}); uv.push_back({0,1});
+// A part whose mesh is built around its own pivot: apply `local` about the
+// pivot, move the pivot to `at` (body frame), then apply the body pose.
+inline Matrix bodyChild(const Matrix& body, Vector3 at, const Matrix& local) {
+  return MatrixMultiply(MatrixMultiply(local, MatrixTranslate(at.x, at.y, at.z)),
+                        body);
+}
+
+// Elevon about its hinge.  Both hinge axes point to the aircraft's right, so
+// +deg (right-hand rule) is trailing edge down on both sides -- the physics'
+// sign convention.
+inline Matrix elevonTransform(const Matrix& body, Vector3 hingePt,
+                              Vector3 hingeAx, float deg) {
+  return bodyChild(body, hingePt,
+                   MatrixRotate(Vector3Normalize(hingeAx), deg * DEG2RAD));
+}
+
+// --- STL meshes -------------------------------------------------------------------
+
+// Binary STL -> triangle soup (3 vertices per triangle), CAD frame.
+inline bool readStl(const std::string& path, std::vector<Vector3>& tris) {
+  FILE* f = fopen(path.c_str(), "rb");
+  if (!f) return false;
+  char header[80];
+  uint32_t n = 0;
+  bool ok = fread(header, 1, 80, f) == 80 && fread(&n, 4, 1, f) == 1;
+  tris.clear();
+  tris.reserve(3 * (size_t)n);
+  for (uint32_t i = 0; ok && i < n; i++) {
+    float rec[12];
+    uint16_t attr;
+    ok = fread(rec, 4, 12, f) == 12 && fread(&attr, 2, 1, f) == 1;
+    for (int k = 0; ok && k < 3; k++)
+      tris.push_back(Vector3{rec[3 + 3*k], rec[4 + 3*k], rec[5 + 3*k]});
   }
+  fclose(f);
+  return ok;
+}
+
+// CAD triangles -> sim-frame raylib mesh, optionally mirrored to the left
+// half, re-centred on `pivot` (sim frame).  Faces are flat-shaded into vertex
+// colours with a fixed body-frame light, and the top (dorsal) and bottom get
+// different colours so attitude reads at LOS distances.
+inline Mesh buildMesh(const std::vector<Vector3>& cadTris, float cgX,
+                      bool mirrorLeft, Vector3 pivot, Color top, Color bottom) {
+  const int nv = (int)cadTris.size();
+  Mesh m{};
+  m.vertexCount = nv;
+  m.triangleCount = nv / 3;
+  m.vertices = (float*)MemAlloc(nv * 3 * sizeof(float));
+  m.normals  = (float*)MemAlloc(nv * 3 * sizeof(float));
+  m.colors   = (unsigned char*)MemAlloc(nv * 4);
+  const Vector3 light = Vector3Normalize({0.3f, 1.0f, 0.5f});
+  for (int t = 0; t < nv / 3; t++) {
+    Vector3 p[3];
+    for (int k = 0; k < 3; k++) {
+      const Vector3 c = cadTris[3*t + k];
+      p[k] = cadToSim(c.x, mirrorLeft ? -c.y : c.y, c.z, cgX);
+    }
+    // mirroring flips handedness: swap two vertices to keep outward winding
+    if (mirrorLeft) { const Vector3 s = p[1]; p[1] = p[2]; p[2] = s; }
+    const Vector3 nrm = Vector3Normalize(Vector3CrossProduct(
+        Vector3Subtract(p[1], p[0]), Vector3Subtract(p[2], p[0])));
+    const Color base = nrm.y >= 0.0f ? top : bottom;
+    const float shade = 0.55f + 0.45f * fmaxf(0.0f, Vector3DotProduct(nrm, light));
+    for (int k = 0; k < 3; k++) {
+      const int i = 3*t + k;
+      const Vector3 v = Vector3Subtract(p[k], pivot);
+      m.vertices[3*i] = v.x; m.vertices[3*i+1] = v.y; m.vertices[3*i+2] = v.z;
+      m.normals[3*i] = nrm.x; m.normals[3*i+1] = nrm.y; m.normals[3*i+2] = nrm.z;
+      m.colors[4*i]   = (unsigned char)(base.r * shade);
+      m.colors[4*i+1] = (unsigned char)(base.g * shade);
+      m.colors[4*i+2] = (unsigned char)(base.b * shade);
+      m.colors[4*i+3] = 255;
+    }
+  }
+  UploadMesh(&m, false);
+  return m;
+}
+
+// The whole airframe: body (both halves) plus one model per elevon, each
+// elevon mesh centred on its hinge point.
+struct AircraftModels {
+  Model body;
+  Model elevon[2];   // 0 = left, 1 = right (StateOutput.elevonDeg order)
 };
 
-// chordwise profile point (aero coords): f in [0,1] chord, side +1 top / -1 bot
-inline Vector3 profileAero(const WingGeom& g, float y, float f, int side) {
-  const float c = wingChord(g, fabsf(y));
-  const float xa = g.cgX - (wingLE(g, fabsf(y)) + f * c);
-  const float th = wingTC(g, fabsf(y)) * c;
-  // z_a down; camber raises the mid-line toward -z_a (top)
-  const float zc = -camberZ(g, fabsf(y), f);
-  const float half = 0.5f * th
-      * sqrtf(fmaxf(0.0f, 1.0f - (2.0f * f - 1.0f) * (2.0f * f - 1.0f)));
-  return Vector3{xa, y, zc + side * half};
+inline bool loadAircraft(const std::string& assetDir, const WingGeom& g,
+                         AircraftModels& out) {
+  std::vector<Vector3> bodyTris, elevTris;
+  if (!readStl(assetDir + "/body_right.stl", bodyTris) ||
+      !readStl(assetDir + "/elevon_right.stl", elevTris)) {
+    fprintf(stderr, "missing CAD meshes in %s "
+                    "(run: uv run python -m sim.as_built --fetch)\n",
+            assetDir.c_str());
+    return false;
+  }
+  // all white, like the printed airframe; the baked sun shading gives form
+  const Color top{238, 238, 234, 255}, bottom{232, 232, 228, 255};
+  const Color elevTop = top, elevBottom = bottom;
+
+  out.body = LoadModelFromMesh(buildMesh(bodyTris, g.cgX, false, {0, 0, 0},
+                                         top, bottom));
+  // second body half as an extra mesh on the same model
+  Mesh left = buildMesh(bodyTris, g.cgX, true, {0, 0, 0}, top, bottom);
+  out.body.meshCount = 2;
+  out.body.meshes = (Mesh*)MemRealloc(out.body.meshes, 2 * sizeof(Mesh));
+  out.body.meshes[1] = left;
+  out.body.meshMaterial = (int*)MemRealloc(out.body.meshMaterial, 2 * sizeof(int));
+  out.body.meshMaterial[1] = 0;
+
+  out.elevon[0] = LoadModelFromMesh(buildMesh(elevTris, g.cgX, true,
+                                              g.hingePtL, elevTop, elevBottom));
+  out.elevon[1] = LoadModelFromMesh(buildMesh(elevTris, g.cgX, false,
+                                              g.hingePtR, elevTop, elevBottom));
+  return true;
 }
 
-// one span section mesh, chord [fa..fb]
-inline Mesh makeWingSection(const WingGeom& g, float y0, float y1,
-                            float fa, float fb, int ny = 3) {
-  static const float fs[] = {0.0f, 0.5f, 1.0f};
-  // chord fractions between fa..fb
-  std::vector<float> chord;
-  for (float f : fs) {
-    float fr = fa + f * (fb - fa);
-    chord.push_back(fr);
-  }
-  MeshBuilder mb;
-  const int nx = (int)chord.size();
-  auto V = [&](float y, int ix, int side) {
-    Vector3 a = profileAero(g, y, chord[ix], side);
-    return aeroToSim(a.x, a.y, a.z);
-  };
-  for (int iy = 0; iy < ny; iy++) {
-    const float ya = y0 + (y1 - y0) * (float)iy / ny;
-    const float yb = y0 + (y1 - y0) * (float)(iy + 1) / ny;
-    for (int ix = 0; ix < nx - 1; ix++) {
-      // top (+z_a is down; top surface faces -z_a => +y_s)
-      mb.tri(V(ya, ix, +1), V(yb, ix, +1), V(yb, ix + 1, +1), {0, 1, 0});
-      mb.tri(V(ya, ix, +1), V(yb, ix + 1, +1), V(ya, ix + 1, +1), {0, 1, 0});
-      // bottom
-      mb.tri(V(ya, ix + 1, -1), V(yb, ix + 1, -1), V(yb, ix, -1), {0, -1, 0});
-      mb.tri(V(ya, ix + 1, -1), V(yb, ix, -1), V(ya, ix, -1), {0, -1, 0});
-    }
-    // leading-edge face at chord[0]
-    mb.tri(V(ya, 0, -1), V(yb, 0, -1), V(yb, 0, +1), {0, 0, -1});
-    mb.tri(V(ya, 0, -1), V(yb, 0, +1), V(ya, 0, +1), {0, 0, -1});
-    // trailing-edge face at chord.back()
-    mb.tri(V(ya, nx - 1, +1), V(yb, nx - 1, +1), V(yb, nx - 1, -1), {0, 0, 1});
-    mb.tri(V(ya, nx - 1, +1), V(yb, nx - 1, -1), V(ya, nx - 1, -1), {0, 0, 1});
-  }
-  // tip caps at y0 / y1
-  for (int ix = 0; ix < nx - 1; ix++) {
-    const float ny0 = (y0 < 0) ? -1.0f : 0.0f;
-    mb.tri(V(y0, ix, +1), V(y0, ix + 1, +1), V(y0, ix + 1, -1),
-           Vector3Normalize(aeroToSim(0, -1, 0)));
-    mb.tri(V(y0, ix, +1), V(y0, ix + 1, -1), V(y0, ix, -1),
-           Vector3Normalize(aeroToSim(0, -1, 0)));
-    mb.tri(V(y1, ix, +1), V(y1, ix + 1, -1), V(y1, ix + 1, +1),
-           Vector3Normalize(aeroToSim(0, +1, 0)));
-    mb.tri(V(y1, ix, +1), V(y1, ix, -1), V(y1, ix + 1, -1),
-           Vector3Normalize(aeroToSim(0, +1, 0)));
-    (void)ny0;
-  }
+// --- props ---------------------------------------------------------------------
+
+// Mesh from flat triangle lists (positions + RGBA), uploaded once complete.
+inline Mesh meshFromTris(const std::vector<Vector3>& v, const std::vector<Color>& c) {
   Mesh m{};
-  m.vertexCount = (int)mb.v.size();
+  m.vertexCount = (int)v.size();
   m.triangleCount = m.vertexCount / 3;
   m.vertices = (float*)MemAlloc(m.vertexCount * 3 * sizeof(float));
-  m.normals  = (float*)MemAlloc(m.vertexCount * 3 * sizeof(float));
-  m.texcoords = (float*)MemAlloc(m.vertexCount * 2 * sizeof(float));
+  m.colors = (unsigned char*)MemAlloc(m.vertexCount * 4);
   for (int i = 0; i < m.vertexCount; i++) {
-    m.vertices[3*i] = mb.v[i].x; m.vertices[3*i+1] = mb.v[i].y;
-    m.vertices[3*i+2] = mb.v[i].z;
-    m.normals[3*i] = mb.n[i].x; m.normals[3*i+1] = mb.n[i].y;
-    m.normals[3*i+2] = mb.n[i].z;
-    m.texcoords[2*i] = mb.uv[i].x; m.texcoords[2*i+1] = mb.uv[i].y;
+    m.vertices[3 * i] = v[i].x; m.vertices[3 * i + 1] = v[i].y; m.vertices[3 * i + 2] = v[i].z;
+    m.colors[4 * i] = c[i].r; m.colors[4 * i + 1] = c[i].g;
+    m.colors[4 * i + 2] = c[i].b; m.colors[4 * i + 3] = c[i].a;
   }
   UploadMesh(&m, false);
   return m;
 }
 
-// elevon slab in a LOCAL frame whose origin is the hinge point; the mesh is
-// rotated at draw time.  side: +1 right (aero y>0), -1 left.
-inline Mesh makeElevon(const WingGeom& g, int side, Vector3 hingePtSim) {
-  const float y0 = side > 0 ? g.elevIn : -g.elevOut;
-  const float y1 = side > 0 ? g.elevOut : -g.elevIn;
-  MeshBuilder mb;
-  const int ny = 4, nx = 3;
-  for (int iy = 0; iy < ny; iy++) {
-    for (int ixc = 0; ixc < nx - 1; ixc++) {
-      const float fa = g.xHinge + (1.0f - g.xHinge) * (float)ixc / (nx - 1);
-      const float fb = g.xHinge + (1.0f - g.xHinge) * (float)(ixc + 1) / (nx - 1);
-      const float ya = y0 + (y1 - y0) * (float)iy / ny;
-      const float yb = y0 + (y1 - y0) * (float)(iy + 1) / ny;
-      auto P = [&](float y, float f, int s) {
-        Vector3 a = profileAero(g, y, f, s > 0 ? 1 : -1);
-        // thinner elevon: shrink thickness toward zero
-        Vector3 p = aeroToSim(a.x, a.y, a.z);
-        return Vector3Subtract(p, hingePtSim);
-      };
-      mb.tri(P(ya, fa, +1), P(yb, fa, +1), P(yb, fb, +1), {0, 1, 0});
-      mb.tri(P(ya, fa, +1), P(yb, fb, +1), P(ya, fb, +1), {0, 1, 0});
-      mb.tri(P(ya, fb, -1), P(yb, fb, -1), P(yb, fa, -1), {0, -1, 0});
-      mb.tri(P(ya, fb, -1), P(yb, fa, -1), P(ya, fa, -1), {0, -1, 0});
-    }
-    const float ya = y0 + (y1 - y0) * (float)iy / ny;
-    const float yb = y0 + (y1 - y0) * (float)(iy + 1) / ny;
-    auto P = [&](float y, float f, int s) {
-      Vector3 a = profileAero(g, y, f, s > 0 ? 1 : -1);
-      return Vector3Subtract(aeroToSim(a.x, a.y, a.z), hingePtSim);
+// Three-blade prop in its own frame: spin axis +z (the nose), blades in the
+// x-y plane, each a tapered, twisted plate.  Draw with culling off.
+inline Mesh makePropMesh(float diameter, int blades = 3) {
+  std::vector<Vector3> v;
+  std::vector<Color> c;
+  const float R = 0.5f * diameter, r0 = 0.12f * R;
+  const int ns = 6;                         // spanwise stations
+  for (int k = 0; k < blades; k++) {
+    const float th = 2.0f * PI * k / blades;
+    const Vector3 rad{cosf(th), sinf(th), 0.0f}, tan{-sinf(th), cosf(th), 0.0f};
+    auto P = [&](int i, float side) {
+      const float t = (float)i / ns;
+      const float r = r0 + (R - r0) * t;
+      const float chord = (0.30f - 0.14f * t) * R;           // root -> tip taper
+      const float pitch = (32.0f - 20.0f * t) * DEG2RAD;     // twist
+      const float a = side * 0.5f * chord;
+      return Vector3Add(Vector3Scale(rad, r),
+                        Vector3Add(Vector3Scale(tan, a * cosf(pitch)),
+                                   Vector3{0, 0, a * sinf(pitch)}));
     };
-    mb.tri(P(ya, 1.0f, +1), P(yb, 1.0f, +1), P(yb, 1.0f, -1), {0, 0, 1});
-    mb.tri(P(ya, 1.0f, +1), P(yb, 1.0f, -1), P(ya, 1.0f, -1), {0, 0, 1});
+    for (int i = 0; i < ns; i++) {
+      const Vector3 a = P(i, -1), b = P(i, 1), d = P(i + 1, 1), e = P(i + 1, -1);
+      const Color col = {40, 40, 44, 255};
+      v.insert(v.end(), {a, b, d, a, d, e});
+      c.insert(c.end(), 6, col);
+    }
   }
-  Mesh m{};
-  m.vertexCount = (int)mb.v.size();
-  m.triangleCount = m.vertexCount / 3;
-  m.vertices = (float*)MemAlloc(m.vertexCount * 3 * sizeof(float));
-  m.normals  = (float*)MemAlloc(m.vertexCount * 3 * sizeof(float));
-  m.texcoords = (float*)MemAlloc(m.vertexCount * 2 * sizeof(float));
-  for (int i = 0; i < m.vertexCount; i++) {
-    m.vertices[3*i] = mb.v[i].x; m.vertices[3*i+1] = mb.v[i].y;
-    m.vertices[3*i+2] = mb.v[i].z;
-    m.normals[3*i] = mb.n[i].x; m.normals[3*i+1] = mb.n[i].y;
-    m.normals[3*i+2] = mb.n[i].z;
-    m.texcoords[2*i] = mb.uv[i].x; m.texcoords[2*i+1] = mb.uv[i].y;
+  return meshFromTris(v, c);
+}
+
+// Translucent disc for the blur of a spinning prop (same frame as the prop).
+inline Mesh makePropDiscMesh(float diameter) {
+  std::vector<Vector3> v;
+  std::vector<Color> c;
+  const float R = 0.5f * diameter;
+  const int n = 24;
+  for (int i = 0; i < n; i++) {
+    const float a0 = 2.0f * PI * i / n, a1 = 2.0f * PI * (i + 1) / n;
+    v.insert(v.end(), {{0, 0, 0}, {R * cosf(a0), R * sinf(a0), 0}, {R * cosf(a1), R * sinf(a1), 0}});
+    c.insert(c.end(), 3, Color{40, 40, 44, 255});
   }
-  UploadMesh(&m, false);
-  return m;
+  return meshFromTris(v, c);
+}
+
+// Motor bell behind the prop: a short octagonal can along -z.
+inline Mesh makeMotorMesh(float radius, float length) {
+  std::vector<Vector3> v;
+  std::vector<Color> c;
+  const int n = 8;
+  const Color side{120, 120, 125, 255}, cap{90, 90, 95, 255};
+  for (int i = 0; i < n; i++) {
+    const float a0 = 2.0f * PI * i / n, a1 = 2.0f * PI * (i + 1) / n;
+    const Vector3 p0{radius * cosf(a0), radius * sinf(a0), 0}, p1{radius * cosf(a1), radius * sinf(a1), 0};
+    const Vector3 q0{p0.x, p0.y, -length}, q1{p1.x, p1.y, -length};
+    v.insert(v.end(), {p0, p1, q1, p0, q1, q0, {0, 0, 0}, p1, p0});
+    c.insert(c.end(), 6, side);
+    c.insert(c.end(), 3, cap);
+  }
+  return meshFromTris(v, c);
 }

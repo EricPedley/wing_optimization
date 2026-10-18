@@ -47,3 +47,16 @@ target_link_libraries(wingsim PRIVATE
 set_target_properties(wingsim PROPERTIES
   BUILD_RPATH "${SIMITL_BUILD}/src"
   INSTALL_RPATH "${SIMITL_BUILD}/src")
+
+# render-transform checks (no window needed)
+add_executable(test_wingmesh test_wingmesh.cpp)
+target_compile_features(test_wingmesh PUBLIC cxx_std_17)
+target_include_directories(test_wingmesh PRIVATE
+  "${SIMITL_ROOT}/src"
+  "${SIMITL_ROOT}/tools/simitl-playback"   # json.h
+  "${RAYLIB_ROOT}/include"
+)
+target_link_directories(test_wingmesh PRIVATE "${RAYLIB_ROOT}/lib")
+target_link_libraries(test_wingmesh PRIVATE raylib m pthread dl rt)
+enable_testing()
+add_test(NAME wingmesh COMMAND test_wingmesh "${CMAKE_CURRENT_SOURCE_DIR}/../as_built.json")
