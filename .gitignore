@@ -7,3 +7,6 @@ pr0p-plugin/bin/
 pr0p-plugin/obj/
 pr0p-plugin/patcher/bin/
 pr0p-plugin/patcher/obj/
+sim/frontend/build/
+sim/frontend/calib.json
+sim/__pycache__/

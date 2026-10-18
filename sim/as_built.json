@@ -1,0 +1,120 @@
+{
+  "vehicleType": 1,
+  "mass": 0.08,
+  "cgX": 0.0784753988263599,
+  "inertia": {
+    "xx": 0.00037340421853981426,
+    "yy": 6.599632497348661e-05,
+    "zz": 0.0004394005435133009,
+    "xy": 0.0,
+    "xz": 0.0,
+    "yz": 0.0
+  },
+  "span": 0.32658601183280617,
+  "rootChord": 0.1539263439226385,
+  "tipChord": 0.07994468345694287,
+  "rootHalfWidth": 0.005,
+  "leSweepDeg": 40.944140833462015,
+  "thicknessRatioRoot": 0.10439633604389978,
+  "thicknessRatioTip": 0.11982921463799728,
+  "camber": {
+    "a1Root": 0.10537981454543004,
+    "a2Root": 0.13649307031875477,
+    "a1Tip": 0.08287399000180976,
+    "a2Tip": 0.10172410449492407
+  },
+  "xHinge": 0.7873879811516036,
+  "elevonInboardY": 0.016329300591640308,
+  "elevonOutboardY": 0.15329300591640307,
+  "elevonMaxDeg": 18.28730014139533,
+  "hinge": {
+    "pointR": {
+      "x": -0.08259591087806684,
+      "y": 0.08481115325402169,
+      "z": 0.0
+    },
+    "axisR": {
+      "x": 0.4469085123900999,
+      "y": 0.8945796675273076,
+      "z": 0.0
+    },
+    "pointL": {
+      "x": -0.08259591087806684,
+      "y": -0.08481115325402169,
+      "z": 0.0
+    },
+    "axisL": {
+      "x": -0.4469085123900999,
+      "y": 0.8945796675273076,
+      "z": 0.0
+    }
+  },
+  "motorY": 0.03579519582281908,
+  "motorXAft": 0.016938220600395713,
+  "motorZ": 0.0,
+  "motorSpinDir": {
+    "right": 1,
+    "left": -1
+  },
+  "thrustScale": 1.0,
+  "propDiameter": 0.051,
+  "aero": {
+    "clMaxBase": 0.8,
+    "clMaxCamberGain": 8.0,
+    "clMaxTcGain": 1.5,
+    "clMaxTcRef": 0.085,
+    "clMaxReGain": 0.12,
+    "clMaxReRef": 40000.0,
+    "clMaxCeiling": 1.35,
+    "flapEffectiveness": 0.65,
+    "flapStallDeg": 15.0,
+    "flapSaturationDeg": 30.0,
+    "slipstreamDevelopment": 0.5,
+    "slipstreamWidthFactor": 1.0,
+    "cd0": 0.02,
+    "cdInduced": 0.0,
+    "cdmaxViterna": 0.0,
+    "numStrips": 33
+  },
+  "servo": {
+    "indexL": 1,
+    "indexR": 0,
+    "centerUs": 1500.0,
+    "degPerUs": 0.04063844475865629,
+    "signL": -1.0,
+    "signR": 1.0,
+    "tauSec": 0.02,
+    "rateDps": 600.0,
+    "minUs": 500.0,
+    "maxUs": 2500.0
+  },
+  "fcYawDeg": 180.0,
+  "motor": {
+    "kv": 21000.0,
+    "r": 0.07,
+    "i0": 0.845,
+    "rth": 35.0,
+    "cth": 2.5,
+    "maxT": 180.0
+  },
+  "propeller": {
+    "bladeCount": 3,
+    "maxRpm": 30000.0,
+    "aFactor": 5.2746e-10,
+    "torqueFactor": 0.0065823,
+    "inertia": 1.154e-07,
+    "thrustFactor": {
+      "x": 0.0,
+      "y": -0.009626,
+      "z": 0.4747
+    }
+  },
+  "battery": {
+    "maxVoltageSag": 0.35,
+    "cellCount": 1,
+    "capacityCharged": 480.0,
+    "capacity": 480.0
+  },
+  "ambientTemp": 25.0,
+  "eepromName": "wing.bin"
+}
