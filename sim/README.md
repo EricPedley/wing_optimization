@@ -212,9 +212,10 @@ window 70-90 s):
 - **Hover realism is unvalidated** — no hover-attempt Blackbox log exists.
 - Static thrust per motor is assumed, not measured; `thrustScale` in
   `as_built.json` corrects it.
-- The FC runs the aircraft's real acro config (`i_roll = i_pitch = 0`, pure
-  PD): holding a hover requires continuous stick correction, same as the
-  real wing — a no-I acro loop cannot hold attitude by itself.
+- The FC runs the aircraft's real config plus sim-only changes in
+  `load_cli.py` `SIM_EXTRA` that are meant for the real wing too:
+  `i_pitch = i_roll = 80` (the real config has no I-term) and max rates
+  400 deg/s on every axis (center sensitivity 70 kept).
 - Betaflight will not arm with throttle above idle and runs a gyro
   calibration during boot — the sim respects both, so hold the throttle low
   and still until armed (the tools do this automatically).

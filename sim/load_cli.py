@@ -75,6 +75,16 @@ SIM_EXTRA = [
      "pitch I-term to cancel the airspeed-dependent trim moment (sim sweep: "
      "80 holds trim within ~3-6 deg and stays damped in hover; >=120 rings "
      "in hover); apply to the real wing too, then drop this line"),
+    ("set i_roll = 80",
+     "roll I-term: without it rolls reach only ~0.5-0.7 of the commanded "
+     "rate and the hover heading drifts (sim sweep: 80 tracks ~1.0 and holds "
+     "heading; >=120 overshoots at 10 m/s and rings in hover); apply to the "
+     "real wing too, then drop this line"),
+    ("rateprofile 0", "select the rate profile for the next lines"),
+    ("set roll_srate = 40", "max rate 400 deg/s on every axis, center "
+     "sensitivity unchanged (70); apply to the real wing too"),
+    ("set pitch_srate = 40", "see roll_srate"),
+    ("set yaw_srate = 40", "see roll_srate"),
     ("set angle_tailsitter = ON",
      "patched Betaflight: ANGLE mode levels the nose-up hover "
      "(SimITL/patches/betaflight/0001-tailsitter-hover-angle-mode.patch)"),
