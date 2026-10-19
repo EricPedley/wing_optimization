@@ -291,6 +291,8 @@ def build():
         "motorIndex": {"right": 1, "left": 0},
         "thrustScale": 1.0,
         "propDiameter": am.PROP_DIAMETER,
+        # stopped-prop drag on the disk area (assumed: locked 3-blade)
+        "propStoppedCd": 0.15,
 
         # section / aero constants, all from airfoil_model.py so the JSON
         # is self-contained (C++ and python defaults mirror these)

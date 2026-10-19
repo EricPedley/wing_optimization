@@ -64,6 +64,7 @@
   },
   "thrustScale": 1.0,
   "propDiameter": 0.051,
+  "propStoppedCd": 0.15,
   "aero": {
     "clMaxBase": 0.8,
     "clMaxCamberGain": 8.0,

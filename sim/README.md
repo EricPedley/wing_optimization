@@ -124,6 +124,18 @@ instead of perpendicular to the wind (+sin a, -cos a), adding a bogus drag of
 at ~3x stall lift near 45 deg -- now Viterna-Corrigan. All unvalidated
 without flight data.
 
+## Props: braking and stopped-prop drag
+
+Prop axial force is `T = a rpm^2 - c rpm V` (thrust coefficient linear in
+advance ratio; zero thrust at ~609 rpm per m/s, ~99 mm effective pitch).  It
+is no longer clamped at zero: above its pitch speed a slow prop brakes, and
+its torque reverses so the airflow drives it (windmilling).  Because that
+form gives no force at rpm 0, a stopped prop also gets flat-plate drag
+`1/2 rho V^2 A_disk propStoppedCd` (0.15, assumed), blended out as
+`(1 - rpm/rpm_zero_thrust)^2`.  At Betaflight's armed idle (~3700 rpm) both
+props brake at cruise speed.  The rpm step is implicit in back-EMF and prop
+load (the old clamp to the no-load rpm blocked windmilling).
+
 ## Hover ANGLE mode (patched Betaflight)
 
 `SimITL/patches/betaflight/0001-tailsitter-hover-angle-mode.patch` (applied
