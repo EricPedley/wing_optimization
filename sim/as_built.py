@@ -259,6 +259,11 @@ def build():
         "tipChord": g["tip_chord"],
         "rootHalfWidth": am.ROOT_SECTION_WIDTH / 2.0,
         "leSweepDeg": g["le_sweep_deg"],
+        # quarter-chord sweep for sweep theory in the strip aero (sideslip)
+        "quarterChordSweepDeg": float(am.quarter_chord_sweep_deg(
+            g["span"], g["root_chord"], g["tip_chord"], g["le_sweep_deg"])),
+        # elevon hinge sweep from the Onshape hinge mate (flap effectiveness)
+        "hingeSweepDeg": float(np.degrees(np.arctan2(-axis_r[0], axis_r[1]))),
         "thicknessRatioRoot": g["root_thickness"] / g["root_chord"],
         "thicknessRatioTip": g["tip_thickness"] / g["tip_chord"],
         "camber": {

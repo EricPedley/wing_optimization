@@ -97,6 +97,20 @@ cd sim/frontend
 The aircraft is the Onshape CAD (`assets/*.stl`, right half mirrored), with
 each elevon rotated about its mated hinge axis.
 
+## Strip aerodynamics: sweep, sideslip, reversed flow
+
+Each spanwise strip uses simple sweep theory: the section sees the flow
+perpendicular to its swept quarter-chord line (36 deg, mirrored left/right),
+so sideslip loads the two halves differently -- roll away from the sideslip
+and weak weathervaning (`test_aero_signs.py`). Flow along the quarter-chord
+line adds skin friction only. The elevon effect is rescaled to its own hinge
+sweep (21 deg, from the Onshape mate). With flow from the trailing edge the
+section is mirrored: force at 3/4 chord, no camber moment, and the elevon
+acts as a weak, reversed leading-edge flap -- so backward flight is
+pitch-unstable, as on the real wing. Unvalidated without flight data; the
+strips also have no finite-span lift-slope correction (aspect ratio ~2.8), so
+lift slope is still on the high side.
+
 ## Hover ANGLE mode (patched Betaflight)
 
 `SimITL/patches/betaflight/0001-tailsitter-hover-angle-mode.patch` (applied

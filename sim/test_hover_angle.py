@@ -84,7 +84,10 @@ def test_angle_mode_sticks_keep_3d_plane_meaning():
     assert tilt[(t >= 7.5) & (t < 8.5)].max() < 12, "roll stick should not lean"
 
     assert window(9.0, 10.0, COL_GYRO["pitch"]).mean() > 5, "pitch fwd = nose down"
-    assert tilt[(t >= 9.5) & (t < 10.0)].min() > 15, "pitch stick should hold a lean"
+    # half stick commands 60 deg * 185/670 = 16.6 deg; the hover angle loop
+    # overshoots and rings around it, so check the average lean
+    lean = tilt[(t >= 9.5) & (t < 10.0)].mean()
+    assert 11.0 < lean < 22.0, f"pitch stick should hold ~16.6 deg, got {lean:.1f}"
 
     assert window(10.5, 11.5, COL_GYRO["yaw"]).mean() < -5, "right rudder = nose right"
     assert tilt[(t >= 11.0) & (t < 11.5)].min() > 10, "rudder should hold a lean"

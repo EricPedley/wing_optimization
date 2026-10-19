@@ -39,6 +39,8 @@ class Params:
         self.tip_chord = doc["tipChord"]
         self.root_half_width = doc["rootHalfWidth"]
         self.le_sweep_deg = doc["leSweepDeg"]
+        self.sweep_c4_deg = doc.get("quarterChordSweepDeg", 0.0)
+        self.hinge_sweep_deg = doc.get("hingeSweepDeg", 0.0)
         self.tc_root = doc["thicknessRatioRoot"]
         self.tc_tip = doc["thicknessRatioTip"]
 
@@ -180,42 +182,61 @@ def forces_moments(p, strips, vel_aero, omega_aero, elevon_l_deg,
             w = induced_velocity(thrust_rl[mi], v[0], disk_area)
             v[0] += p.slipstream_dev * 2.0 * w
 
-        un, wn = v[0], v[2]
+        # simple sweep theory + reversed flow: same as
+        # TailsitterPhysics::computeForces (see the comments there)
+        lam = p.sweep_c4_deg * DEG2RAD if ay > p.root_half_width else 0.0
+        side = 1.0 if s["y"] > 0 else -1.0
+        c_hat = np.array([np.cos(lam), side * np.sin(lam), 0.0])
+        s_hat = np.array([-np.sin(lam), side * np.cos(lam), 0.0])
+        z_hat = np.array([0.0, 0.0, 1.0])
+        un, wn, vs = float(v @ c_hat), float(v[2]), float(v @ s_hat)
         v2 = un * un + wn * wn
-        alpha = np.arctan2(wn, un)
+        reversed_flow = un < 0.0
+        alpha = np.arctan2(wn, -un) if reversed_flow else np.arctan2(wn, un)
 
         delta_rad = 0.0
         flap_lift_slope = 0.0
         flap_moment_slope = 0.0
         if s["flap_side"] >= 0:
             deg = elevon[s["flap_side"]]
-            th = np.arccos(np.clip(1.0 - 2.0 * p.x_hinge,
-                                   -1.0 + 1e-9, 1.0 - 1e-9))
             excess = max(abs(deg) - p.flap_stall_deg, 0.0)
             eff = p.flap_effectiveness * np.exp(
                 -excess / (p.flap_sat_deg - p.flap_stall_deg))
-            flap_lift_slope = 2.0 * (np.pi - th + np.sin(th)) * eff
-            flap_moment_slope = 0.25 * (np.sin(2.0 * th)
-                                        - 2.0 * np.sin(th)) * eff
             delta_rad = deg * DEG2RAD
+            if not reversed_flow:
+                th = np.arccos(np.clip(1.0 - 2.0 * p.x_hinge, -1.0 + 1e-9, 1.0 - 1e-9))
+                flap_lift_slope = 2.0 * (np.pi - th + np.sin(th)) * eff
+                flap_moment_slope = 0.25 * (np.sin(2.0 * th) - 2.0 * np.sin(th)) * eff
+            else:
+                th = np.arccos(np.clip(1.0 - 2.0 * (1.0 - p.x_hinge), -1.0 + 1e-9, 1.0 - 1e-9))
+                flap_lift_slope = -2.0 * (th - np.sin(th)) * eff
 
-        alpha_l0 = -0.5 * s["a1"]
-        alpha_eff = (alpha - alpha_l0
-                     + flap_lift_slope * delta_rad / (2.0 * np.pi))
+        if s["flap_side"] >= 0 and lam > 0.0:
+            ch = np.cos(p.hinge_sweep_deg * DEG2RAD) / np.cos(lam)
+            flap_lift_slope *= ch * ch
+            flap_moment_slope *= ch * ch
+
+        alpha_l0 = 0.0 if reversed_flow else -0.5 * s["a1"]
+        alpha_eff = alpha - alpha_l0 + flap_lift_slope * delta_rad / (2.0 * np.pi)
 
         re = RHO * np.sqrt(v2) * s["chord"] / MU
         cl_max = cl_max_for(p, s, re)
         cl, cd = section_cl_cd_cm(p, cl_max, alpha_eff)
-        cm = 0.25 * np.pi * (s["a2"] - s["a1"]) + flap_moment_slope * delta_rad
+        cm = 0.0 if reversed_flow else (
+            0.25 * np.pi * (s["a2"] - s["a1"]) + flap_moment_slope * delta_rad)
 
         q = 0.5 * RHO * v2
         dA = s["chord"] * s["dy"]
         sa, ca = np.sin(alpha), np.cos(alpha)
-        f_dir = np.array([-sa, 0.0, -ca])   # lift direction
-        d_dir = np.array([-ca, 0.0, -sa])   # drag direction
-        f = f_dir * (q * dA * cl) + d_dir * (q * dA * cd)
+        xs = -1.0 if reversed_flow else 1.0
+        f_dir = c_hat * (-sa * xs) + z_hat * (-ca)
+        d_dir = c_hat * (-ca * xs) + z_hat * (-sa)
+        f_span = s_hat * (-0.5 * RHO * abs(vs) * vs * 0.5 * p.cd0 * dA)
+        f = f_dir * (q * dA * cl) + d_dir * (q * dA * cd) + f_span
+        xa = 0.75 if reversed_flow else 0.25
+        rf = np.array([p.cgX - (s["leX"] + xa * s["chord"]), s["y"], 0.0])
         F += f
-        M += np.cross(r, f)
+        M += np.cross(rf, f)
         M[1] += q * s["chord"] ** 2 * s["dy"] * cm
 
     # motor thrust along +x and its moment arms
