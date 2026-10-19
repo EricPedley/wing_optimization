@@ -107,9 +107,22 @@ line adds skin friction only. The elevon effect is rescaled to its own hinge
 sweep (21 deg, from the Onshape mate). With flow from the trailing edge the
 section is mirrored: force at 3/4 chord, no camber moment, and the elevon
 acts as a weak, reversed leading-edge flap -- so backward flight is
-pitch-unstable, as on the real wing. Unvalidated without flight data; the
-strips also have no finite-span lift-slope correction (aspect ratio ~2.8), so
-lift slope is still on the high side.
+pitch-unstable, as on the real wing.
+
+Finite span (aspect ratio 2.8): a discrete Prandtl lifting line on the unswept
+planform (the sections already apply sweep theory) gives each strip an induced
+angle from the trailing vortices, solved once per step as a linear system with
+each strip's angle clamped to stall (a nonlinear post-stall lifting line has
+multiple solutions). Lift then acts perpendicular to the downwashed inflow,
+which is the induced drag. Whole-wing lift slope 2.99/rad (DATCOM estimate
+2.98; the strips alone gave 5.1), induced drag 0.128 CL^2 (e ~ 0.9), CL_max
+~0.76 near 10 deg, flat-plate plateau ~0.58 post-stall.
+
+Two older bugs fixed with it: strip lift pointed along (-sin a, -cos a)
+instead of perpendicular to the wind (+sin a, -cos a), adding a bogus drag of
+~2 alpha x lift; and the post-stall lift curve (cl_s sin 2a / sin 2a_s) peaked
+at ~3x stall lift near 45 deg -- now Viterna-Corrigan. All unvalidated
+without flight data.
 
 ## Hover ANGLE mode (patched Betaflight)
 

@@ -114,7 +114,51 @@ def build_strips(p):
             flap_side = 0 if y < 0 else 1     # 0 = left (y<0), 1 = right
         rows.append(dict(y=y, dy=dy, chord=chord, tc=tc, leX=le_x,
                          a1=a1, a2=a2, flap_side=flap_side))
+    p.downwash = downwash_matrix(p, rows)
     return rows
+
+
+def _segment_w(px, py, ax, ay, bx, by):
+    """z-velocity at (px, py) from a unit vortex segment a->b in the z=0
+    plane (Biot-Savart)."""
+    r0x, r0y = bx - ax, by - ay
+    r1x, r1y = px - ax, py - ay
+    r2x, r2y = px - bx, py - by
+    cr = r1x * r2y - r1y * r2x
+    n1, n2 = np.hypot(r1x, r1y), np.hypot(r2x, r2y)
+    if cr * cr < 1e-12 or n1 < 1e-9 or n2 < 1e-9:
+        return 0.0
+    dot = r0x * (r1x / n1 - r2x / n2) + r0y * (r1y / n1 - r2y / n2)
+    return cr / (cr * cr) * dot / (4.0 * np.pi)
+
+
+def downwash_matrix(p, strips):
+    """Discrete Prandtl lifting line: K[i][j] = downwash (aero +z, m/s) on
+    the lifting line at strip i per unit circulation (m^2/s) on strip j's
+    horseshoe vortex (bound along the span, trailing legs streaming aft).
+    Evaluated on the bound line, so only the trailing legs contribute (the
+    collinear bound segments induce nothing there) -- the 2D section curve
+    already supplies the bound vortex's own effect.
+
+    The vortices are laid out on the *unswept* planform (same span and
+    chords, bound vortices on one straight line): the sections already apply
+    sweep theory, so sweeping the vortices too would count sweep twice.  This
+    supplies only the finite-span (low aspect ratio) downwash.  Same as
+    TailsitterPhysics::buildDownwash."""
+    n = len(strips)
+    far = 1000.0                                  # m: trailing legs end here
+    K = np.zeros((n, n))
+    for i, si in enumerate(strips):
+        px, py = 0.0, si["y"]                     # on the lifting line
+        for j, sj in enumerate(strips):
+            ay, by = sj["y"] - 0.5 * sj["dy"], sj["y"] + 0.5 * sj["dy"]
+            K[i, j] = (_segment_w(px, py, -far, ay, 0.0, ay)
+                       + _segment_w(px, py, 0.0, ay, 0.0, by)
+                       + _segment_w(px, py, 0.0, by, -far, by))
+    # positive circulation (lift) must wash its own control point down
+    if np.trace(K) < 0:
+        K = -K
+    return K
 
 
 def camber_max(a1, a2):
@@ -142,14 +186,20 @@ def section_cl_cd_cm(p, cl_max, alpha_eff):
     a_s = cl_max / slope
     sgn = 1.0 if alpha_eff >= 0.0 else -1.0
     a_abs = abs(alpha_eff)
+    # no Cl^2/(pi A e) term: induced drag comes from the lifting line
+    # (each strip's lift is tilted back by its induced angle)
     if a_abs <= a_s:
         cl = slope * alpha_eff
-        k_ind = p.cd_induced or 1.0 / (np.pi * p.aspect * 0.85)
-        cd = p.cd0 + k_ind * cl * cl
+        cd = p.cd0
     else:
         cl_s = cl_max
-        cd_s = p.cd0 + 1.0 / (np.pi * p.aspect * 0.85) * cl_s * cl_s
-        cl = sgn * cl_s * np.sin(2.0 * a_abs) / np.sin(2.0 * a_s)
+        cd_s = p.cd0
+        # Viterna-Corrigan: flat-plate 1/2 Cdmax sin 2a plus a term that
+        # matches cl_s at the stall angle and decays (cl used to be
+        # cl_s sin 2a / sin 2a_s, peaking ~3x cl_s at 45 deg)
+        a2 = (cl_s - p.cdmax * np.sin(a_s) * np.cos(a_s)) * np.sin(a_s) / np.cos(a_s) ** 2
+        cl = sgn * (0.5 * p.cdmax * np.sin(2.0 * a_abs)
+                    + a2 * np.cos(a_abs) ** 2 / max(np.sin(a_abs), 1e-6))
         s2 = np.sin(a_abs) ** 2
         s2s = np.sin(a_s) ** 2
         cd = cd_s + (p.cdmax - cd_s) * (s2 - s2s) / max(1.0 - s2s, 1e-6)
@@ -165,30 +215,28 @@ def induced_velocity(thrust_n, v_inf, disk_area):
 
 def forces_moments(p, strips, vel_aero, omega_aero, elevon_l_deg,
                    elevon_r_deg, thrust_rl):
-    """Body-force/moment in the aerospace frame.  thrust_rl is (right,left)."""
+    """Body-force/moment in the aerospace frame.  thrust_rl is (right,left).
+    Same algorithm as TailsitterPhysics::computeForces (see comments there)."""
     disk_area = 0.25 * np.pi * p.prop_diameter ** 2
     half_wash = 0.5 * p.slipstream_width * p.prop_diameter
     elevon = (elevon_l_deg, elevon_r_deg)
+    n = len(strips)
 
-    F = np.zeros(3)
-    M = np.zeros(3)
+    # --- pass 1: per-strip flow and section parameters ----------------------
+    st = []
     for s in strips:
         r = np.array([p.cgX - (s["leX"] + 0.25 * s["chord"]), s["y"], 0.0])
         v = vel_aero + np.cross(omega_aero, r)
-
         ay = abs(s["y"])
         if abs(ay - p.motor_y) <= half_wash:
             mi = 0 if s["y"] > 0 else 1     # motor 0 = right (y>0)
             w = induced_velocity(thrust_rl[mi], v[0], disk_area)
             v[0] += p.slipstream_dev * 2.0 * w
 
-        # simple sweep theory + reversed flow: same as
-        # TailsitterPhysics::computeForces (see the comments there)
         lam = p.sweep_c4_deg * DEG2RAD if ay > p.root_half_width else 0.0
         side = 1.0 if s["y"] > 0 else -1.0
         c_hat = np.array([np.cos(lam), side * np.sin(lam), 0.0])
         s_hat = np.array([-np.sin(lam), side * np.cos(lam), 0.0])
-        z_hat = np.array([0.0, 0.0, 1.0])
         un, wn, vs = float(v @ c_hat), float(v[2]), float(v @ s_hat)
         v2 = un * un + wn * wn
         reversed_flow = un < 0.0
@@ -210,34 +258,65 @@ def forces_moments(p, strips, vel_aero, omega_aero, elevon_l_deg,
             else:
                 th = np.arccos(np.clip(1.0 - 2.0 * (1.0 - p.x_hinge), -1.0 + 1e-9, 1.0 - 1e-9))
                 flap_lift_slope = -2.0 * (th - np.sin(th)) * eff
-
         if s["flap_side"] >= 0 and lam > 0.0:
             ch = np.cos(p.hinge_sweep_deg * DEG2RAD) / np.cos(lam)
             flap_lift_slope *= ch * ch
             flap_moment_slope *= ch * ch
 
         alpha_l0 = 0.0 if reversed_flow else -0.5 * s["a1"]
-        alpha_eff = alpha - alpha_l0 + flap_lift_slope * delta_rad / (2.0 * np.pi)
-
         re = RHO * np.sqrt(v2) * s["chord"] / MU
-        cl_max = cl_max_for(p, s, re)
-        cl, cd = section_cl_cd_cm(p, cl_max, alpha_eff)
-        cm = 0.0 if reversed_flow else (
-            0.25 * np.pi * (s["a2"] - s["a1"]) + flap_moment_slope * delta_rad)
+        st.append(dict(c_hat=c_hat, s_hat=s_hat, vs=vs, v2=v2, vn=np.sqrt(v2),
+                       reversed=reversed_flow, alpha=alpha,
+                       shift=flap_lift_slope * delta_rad / (2.0 * np.pi) - alpha_l0,
+                       flap_m=flap_moment_slope * delta_rad,
+                       cl_max=cl_max_for(p, s, re)))
 
-        q = 0.5 * RHO * v2
+    # --- pass 2: lifting line --------------------------------------------------
+    # One linear solve for the circulation: gamma_i = 1/2 c_i 2pi (vfl_i
+    # alpha_c,i - (K gamma)_i), with each strip's angle clamped to its stall
+    # angle.  Exact lifting line in attached flow; in stall the downwash is
+    # that of stall-level lift (a nonlinear post-stall lifting line has
+    # multiple solutions and Newton wanders between them).  Reversed-flow
+    # strips carry no circulation.  vfl = max(Vn, 0.5).
+    vfl = np.array([max(q["vn"], 0.5) for q in st])
+    A = np.eye(n)
+    rhs = np.zeros(n)
+    for i, (s, q) in enumerate(zip(strips, st)):
+        if q["reversed"]:
+            continue
+        a_s = q["cl_max"] / (2.0 * np.pi)
+        a_c = float(np.clip(q["alpha"] + q["shift"], -a_s, a_s))
+        g = 0.5 * s["chord"] * 2.0 * np.pi
+        A[i] += g * p.downwash[i]
+        rhs[i] = g * vfl[i] * a_c
+    gamma = np.linalg.solve(A, rhs)
+    a_ind = np.array([0.0 if q["reversed"] else w / vfl[i]
+                      for i, (q, w) in enumerate(zip(st, p.downwash @ gamma))])
+
+    # --- pass 3: forces, lift perpendicular to the downwashed inflow --------
+    F = np.zeros(3)
+    M = np.zeros(3)
+    z_hat = np.array([0.0, 0.0, 1.0])
+    for i, (s, q) in enumerate(zip(strips, st)):
+        a_flow = q["alpha"] - a_ind[i]
+        cl, cd = section_cl_cd_cm(p, q["cl_max"], a_flow + q["shift"])
+        cm = 0.0 if q["reversed"] else 0.25 * np.pi * (s["a2"] - s["a1"]) + q["flap_m"]
+        qd = 0.5 * RHO * q["v2"]
         dA = s["chord"] * s["dy"]
-        sa, ca = np.sin(alpha), np.cos(alpha)
-        xs = -1.0 if reversed_flow else 1.0
-        f_dir = c_hat * (-sa * xs) + z_hat * (-ca)
-        d_dir = c_hat * (-ca * xs) + z_hat * (-sa)
-        f_span = s_hat * (-0.5 * RHO * abs(vs) * vs * 0.5 * p.cd0 * dA)
-        f = f_dir * (q * dA * cl) + d_dir * (q * dA * cd) + f_span
-        xa = 0.75 if reversed_flow else 0.25
+        sa, ca = np.sin(a_flow), np.cos(a_flow)
+        xs = -1.0 if q["reversed"] else 1.0
+        # lift is perpendicular to the relative wind (-cos a, -sin a in the
+        # section plane): (+sin a, -cos a), mirrored for reversed flow.  (The
+        # model used to have -sin a here, tilting lift back by 2 alpha.)
+        f_dir = q["c_hat"] * (sa * xs) + z_hat * (-ca)
+        d_dir = q["c_hat"] * (-ca * xs) + z_hat * (-sa)
+        f_span = q["s_hat"] * (-0.5 * RHO * abs(q["vs"]) * q["vs"] * 0.5 * p.cd0 * dA)
+        f = f_dir * (qd * dA * cl) + d_dir * (qd * dA * cd) + f_span
+        xa = 0.75 if q["reversed"] else 0.25
         rf = np.array([p.cgX - (s["leX"] + xa * s["chord"]), s["y"], 0.0])
         F += f
         M += np.cross(rf, f)
-        M[1] += q * s["chord"] ** 2 * s["dy"] * cm
+        M[1] += qd * s["chord"] ** 2 * s["dy"] * cm
 
     # motor thrust along +x and its moment arms
     motor_x_aero = p.cgX - p.motor_x_aft
